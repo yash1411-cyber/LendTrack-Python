@@ -261,24 +261,97 @@ def get_loan(loan_id: str) -> Optional[dict]:
 # TRANSACTION CRUD
 # ──────────────────────────────────────────────
 
-def add_transaction(borrower_id: str, loan_id: str, txn_type: str,
-                    amount: float, txn_date: str, notes: str = ""):
-    conn = get_connection()
+def _compose_notes(notes: str = "", payment_mode: str = None) -> str:
+    """Merge optional payment_mode into notes (no schema column for payment_mode)."""
+    text = (notes or "").strip()
+    if payment_mode:
+        mode = str(payment_mode).strip()
+        if mode and mode.lower() != "nan":
+            tag = f"[Payment: {mode}]"
+            if tag not in text:
+                text = f"{text} {tag}".strip() if text else tag
+    return text
+
+
+def _apply_transaction(conn: sqlite3.Connection, borrower_id: str, loan_id: str,
+                       txn_type: str, amount: float, txn_date: str,
+                       notes: str = "", payment_mode: str = None) -> None:
+    """
+    Insert one transaction (and principal side-effect) on an open connection.
+    Does not commit — caller owns the transaction boundary.
+    """
+    if amount is None or float(amount) <= 0:
+        raise ValueError(f"Amount must be positive, got: {amount}")
+    amount = float(amount)
+    composed = _compose_notes(notes, payment_mode)
     conn.execute(
         """INSERT INTO transactions (borrower_id, loan_id, txn_type, amount, txn_date, notes)
            VALUES (?,?,?,?,?,?)""",
-        (borrower_id, loan_id, txn_type, amount, txn_date, notes)
+        (borrower_id, loan_id, txn_type, amount, txn_date, composed)
     )
-
-    # If principal is being returned, reduce the outstanding principal on the loan
     if txn_type == "Principal Received" and loan_id:
         conn.execute(
             "UPDATE loans SET principal = MAX(0, principal - ?) WHERE loan_id=?",
             (amount, loan_id)
         )
 
-    conn.commit()
-    conn.close()
+
+def add_transaction(borrower_id: str, loan_id: str, txn_type: str,
+                    amount: float, txn_date: str, notes: str = "",
+                    payment_mode: str = None):
+    """
+    Add a single transaction and commit.
+
+    payment_mode is accepted for Excel-import compatibility and stored in notes
+    (no separate DB column). Manual UI callers may omit it.
+    """
+    conn = get_connection()
+    try:
+        _apply_transaction(
+            conn, borrower_id, loan_id, txn_type, amount, txn_date, notes, payment_mode
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def add_transactions_batch(transactions: list) -> int:
+    """
+    Insert many transactions atomically on DB_PATH.
+
+    Each item is a dict with keys:
+      borrower_id, loan_id, txn_type, amount, txn_date
+      optional: notes, payment_mode
+
+    On any failure the entire batch is rolled back and the exception is re-raised.
+    Returns the number of transactions committed.
+    """
+    if not transactions:
+        return 0
+
+    conn = get_connection()
+    try:
+        for item in transactions:
+            _apply_transaction(
+                conn,
+                borrower_id=item["borrower_id"],
+                loan_id=item.get("loan_id"),
+                txn_type=item["txn_type"],
+                amount=item["amount"],
+                txn_date=item["txn_date"],
+                notes=item.get("notes", ""),
+                payment_mode=item.get("payment_mode"),
+            )
+        conn.commit()
+        return len(transactions)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_all_transactions(limit: int = 200) -> list:

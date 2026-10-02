@@ -512,7 +512,7 @@ Total Records:           {len(self.transactions)}
     # ════════════════════════════════════════════════════════════════════════════
     
     def _start_import(self):
-        """Import matched transactions"""
+        """Import matched transactions atomically (all-or-nothing)."""
         if len(self.matched_txns) == 0 and len(self.review_txns) == 0:
             messagebox.showwarning("No Data", "No valid transactions to import")
             return
@@ -524,50 +524,67 @@ Total Records:           {len(self.transactions)}
             f"({len(self.error_txns)} errors will be skipped)"):
             return
         
-        print("[IMPORT] Starting import...")
+        print("[IMPORT] Starting atomic import...")
         
+        batch = []
+        for item in self.matched_txns:
+            txn = item['txn']
+            loan = item['loan']
+            batch.append({
+                "borrower_id": loan["borrower_id"],
+                "loan_id": loan["loan_id"],
+                "txn_type": txn["txn_type"],
+                "amount": txn["amount"],
+                "txn_date": txn["date"],
+                "notes": txn.get("notes", ""),
+                "payment_mode": txn.get("payment_mode"),
+            })
+
         imported = 0
         failed = 0
-        
-        # Import matched transactions
-        for item in self.matched_txns:
+        error_message = ""
+
+        if batch:
             try:
-                txn = item['txn']
-                loan = item['loan']
-                
-                db.add_transaction(
-                    borrower_id=loan['borrower_id'],
-                    loan_id=loan['loan_id'],
-                    txn_type=txn['txn_type'],
-                    amount=txn['amount'],
-                    payment_mode=txn['payment_mode'],
-                    txn_date=txn['date'],
-                    notes=txn['notes']
-                )
-                
-                imported += 1
+                imported = db.add_transactions_batch(batch)
             except Exception as e:
-                print(f"[IMPORT] Failed to import: {str(e)}")
-                failed += 1
-        
-        # Rebuild metrics
-        print("[IMPORT] Rebuilding metrics...")
-        rebuild_result = self.rebuild_service.rebuild_all()
-        
-        # Show results
+                print(f"[IMPORT] Batch failed — rolled back: {e}")
+                imported = 0
+                failed = len(batch)
+                error_message = str(e)
+                messagebox.showerror(
+                    "Import Failed",
+                    f"Import was rolled back. No transactions were saved.\n\n{error_message}"
+                )
+
+        # Historical rebuild is deferred to Stage 5 (schema/principal model mismatch).
+        print("[IMPORT] Skipping historical rebuild (deferred to Stage 5)")
+
         print(f"[IMPORT] Complete - {imported} imported, {failed} failed")
-        self._show_results(imported, failed)
+        self._show_results(imported, failed, error_message=error_message)
         
         # Advance to step 3
         self._advance_to_step3()
     
-    def _show_results(self, imported, failed):
+    def _show_results(self, imported, failed, error_message: str = ""):
         """Display import results"""
         self.result_cards['imported'].configure(text=str(imported))
         self.result_cards['matched'].configure(text=str(len(self.matched_txns)))
         self.result_cards['duplicates'].configure(text=str(len(self.duplicate_txns)))
-        self.result_cards['errors'].configure(text=str(len(self.error_txns)))
+        self.result_cards['errors'].configure(text=str(len(self.error_txns) + (1 if failed else 0)))
         
+        if failed:
+            status_line = "Status: ✗ IMPORT ROLLED BACK (no rows saved)"
+            rebuild_note = "Financial metrics were not recalculated."
+            fail_line = f"✗ Batch failures:        {failed}\n✗ Error: {error_message}\n"
+        else:
+            status_line = "Status: ✓ IMPORT SUCCESSFUL"
+            rebuild_note = (
+                "Note: historical metric rebuild is deferred (Stage 5).\n"
+                "Dashboard values use live calculations from transactions."
+            )
+            fail_line = ""
+
         result_text = f"""
 ╔════════════════════════════════════════════════════════════════════════════╗
 ║                         IMPORT COMPLETED                                   ║
@@ -575,15 +592,11 @@ Total Records:           {len(self.transactions)}
 
 ✓ Imported:              {imported}
 ⊘ Duplicates (skipped):  {len(self.duplicate_txns)}
-✗ Errors (skipped):      {len(self.error_txns)}
+✗ Prefail errors (skip): {len(self.error_txns)}
+{fail_line}
+{rebuild_note}
 
-All financial metrics have been recalculated:
-  • Outstanding principal updated
-  • Pending interest recalculated
-  • Dashboard metrics refreshed
-  • Borrower summaries updated
-
-Status: ✓ IMPORT SUCCESSFUL
+{status_line}
 """
         
         self.result_text.configure(state=NORMAL)
