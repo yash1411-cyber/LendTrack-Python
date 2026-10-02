@@ -15,6 +15,7 @@ from services.excel_import_service import ExcelImportService
 from services.loan_matcher import LoanMatcher
 from services.duplicate_checker import DuplicateChecker
 from services.historical_rebuild_service import HistoricalRebuildService
+from services.import_classify import classify_import_rows, build_import_status
 import database as db
 
 # Colors
@@ -198,98 +199,20 @@ Both formats are supported. Choose the one that's easiest for you.
     # ════════════════════════════════════════════════════════════════════════════
     
     def _validate_and_match(self):
-        """Validate transactions and match to loans"""
-        self.matched_txns = []
-        self.review_txns = []
-        self.error_txns = []
-        self.duplicate_txns = []
-        
+        """Validate transactions and match to loans (Stage 4 classifier)."""
         print(f"[VALIDATE] Processing {len(self.transactions)} transactions")
-        
-        for idx, txn in enumerate(self.transactions):
-            matched_loan = None
-            error_msg = None
-            needs_review = False
-            
-            try:
-                # OLD FORMAT: Use display name
-                if 'loan_display' in txn:
-                    print(f"[VALIDATE] Row {idx+1}: OLD FORMAT - {txn['borrower_name']} | {txn['loan_display']}")
-                    loan, status = self.loan_matcher.match_by_display_name(
-                        txn['borrower_name'], 
-                        txn['loan_display']
-                    )
-                    
-                    if status == 'matched':
-                        matched_loan = loan
-                    else:
-                        error_msg = status
-                
-                # NEW FORMAT: Use due day
-                elif 'due_day' in txn:
-                    print(f"[VALIDATE] Row {idx+1}: NEW FORMAT - {txn['borrower_name']} | Due Day {txn['due_day']}")
-                    
-                    # Step 1: Match by borrower + due day
-                    loan, candidates, step1_status = self.loan_matcher.match_by_borrower_due_day(
-                        txn['borrower_name'],
-                        txn['due_day']
-                    )
-                    
-                    if step1_status == 'exact_match':
-                        matched_loan = loan
-                    elif step1_status == 'ambiguous':
-                        # Step 2: Try interest-based matching
-                        loan, step2_status = self.loan_matcher.match_by_borrower_due_day_interest(
-                            txn['borrower_name'],
-                            txn['due_day'],
-                            txn['amount'],
-                            txn['txn_type']
-                        )
-                        
-                        if step2_status == 'matched_by_interest':
-                            matched_loan = loan
-                        else:
-                            # Step 3: Need manual review
-                            needs_review = True
-                            self.review_txns.append({
-                                'txn': txn,
-                                'candidates': candidates,
-                            })
-                    else:
-                        error_msg = step1_status
-                
-                # Check for duplicates
-                if matched_loan and not needs_review:
-                    if self.duplicate_checker.check_duplicate(txn, matched_loan['loan_id']):
-                        print(f"[VALIDATE] Row {idx+1}: DUPLICATE")
-                        self.duplicate_txns.append({
-                            'txn': txn,
-                            'loan': matched_loan,
-                        })
-                    else:
-                        print(f"[VALIDATE] Row {idx+1}: MATCHED ✓")
-                        self.matched_txns.append({
-                            'txn': txn,
-                            'loan': matched_loan,
-                        })
-                
-                elif error_msg and not needs_review:
-                    print(f"[VALIDATE] Row {idx+1}: ERROR - {error_msg}")
-                    self.error_txns.append({
-                        'txn': txn,
-                        'error': error_msg,
-                    })
-            
-            except Exception as e:
-                print(f"[VALIDATE] Row {idx+1}: EXCEPTION - {str(e)}")
-                self.error_txns.append({
-                    'txn': txn,
-                    'error': str(e),
-                })
-        
-        print(f"[VALIDATE] Results: {len(self.matched_txns)} matched, "
-              f"{len(self.review_txns)} review, {len(self.duplicate_txns)} dup, "
-              f"{len(self.error_txns)} errors")
+        result = classify_import_rows(
+            self.transactions, self.loan_matcher, self.duplicate_checker
+        )
+        self.matched_txns = result["matched_txns"]
+        self.review_txns = result["review_txns"]
+        self.duplicate_txns = result["duplicate_txns"]
+        self.error_txns = result["error_txns"]
+        print(
+            f"[VALIDATE] Results: {len(self.matched_txns)} matched, "
+            f"{len(self.review_txns)} review, {len(self.duplicate_txns)} dup, "
+            f"{len(self.error_txns)} errors"
+        )
     
     # ════════════════════════════════════════════════════════════════════════════
     # STEP 2: PREVIEW
@@ -386,13 +309,19 @@ Total Records:           {len(self.transactions)}
 ║ ⚠ NEEDS MANUAL REVIEW ({len(self.review_txns)})""")
             self.preview_text.insert("end", " " * (75 - len(f"NEEDS MANUAL REVIEW ({len(self.review_txns)})")) + "║\n")
             self.preview_text.insert("end", "╚════════════════════════════════════════════════════════════════════════════╝\n")
-            self.preview_text.insert("end", "These transactions have multiple matching loans. Manual selection required.\n\n")
+            self.preview_text.insert(
+                "end",
+                "These rows are NOT imported in this step. "
+                "Manual loan selection is required (Ambiguous Match UI — Stage 7).\n\n",
+            )
             
             for item in self.review_txns[:5]:
                 txn = item['txn']
+                reason = item.get('reason', 'ambiguous')
                 self.preview_text.insert("end", 
                     f"  {txn['date']} | {txn['borrower_name']:20} | {txn['txn_type']:20}\n"
-                    f"    └─ Amount: ₹{txn['amount']:,.0f} | {len(item['candidates'])} matching loans\n\n")
+                    f"    └─ Amount: ₹{txn['amount']:,.0f} | "
+                    f"{len(item.get('candidates') or [])} candidates | {reason}\n\n")
             
             if len(self.review_txns) > 5:
                 self.preview_text.insert("end", f"  ... and {len(self.review_txns) - 5} more\n\n")
@@ -407,8 +336,10 @@ Total Records:           {len(self.transactions)}
             
             for item in self.duplicate_txns[:5]:
                 txn = item['txn']
+                reason = item.get('reason', 'duplicate')
                 self.preview_text.insert("end", 
-                    f"  {txn['date']} | {txn['borrower_name']:20} | {txn['txn_type']:20} | ₹{txn['amount']:>10,.0f}\n\n")
+                    f"  {txn['date']} | {txn['borrower_name']:20} | {txn['txn_type']:20} | "
+                    f"₹{txn['amount']:>10,.0f}  [{reason}]\n\n")
             
             if len(self.duplicate_txns) > 5:
                 self.preview_text.insert("end", f"  ... and {len(self.duplicate_txns) - 5} more\n\n")
@@ -513,15 +444,34 @@ Total Records:           {len(self.transactions)}
     
     def _start_import(self):
         """Import matched transactions atomically (all-or-nothing)."""
-        if len(self.matched_txns) == 0 and len(self.review_txns) == 0:
-            messagebox.showwarning("No Data", "No valid transactions to import")
+        if len(self.matched_txns) == 0:
+            if self.review_txns:
+                messagebox.showwarning(
+                    "Nothing to Import",
+                    f"{len(self.review_txns)} row(s) need manual review and will NOT be imported yet.\n\n"
+                    f"Duplicates skipped: {len(self.duplicate_txns)}\n"
+                    f"Errors skipped: {len(self.error_txns)}\n\n"
+                    "Resolve ambiguous matches in a later step (Stage 7)."
+                )
+            else:
+                messagebox.showwarning(
+                    "No Data",
+                    "No valid unambiguous transactions to import.\n\n"
+                    f"Duplicates skipped: {len(self.duplicate_txns)}\n"
+                    f"Errors skipped: {len(self.error_txns)}"
+                )
+            # Still show an honest results panel
+            self._show_results(0, 0, error_message="")
+            self._advance_to_step3()
             return
         
-        if not messagebox.askyesno("Confirm Import", 
-            f"Import {len(self.matched_txns)} transactions?\n\n"
-            f"({len(self.review_txns)} will need manual review)\n"
-            f"({len(self.duplicate_txns)} duplicates will be skipped)\n"
-            f"({len(self.error_txns)} errors will be skipped)"):
+        confirm_msg = (
+            f"Import {len(self.matched_txns)} matched transaction(s)?\n\n"
+            f"⚠ Review (NOT imported): {len(self.review_txns)}\n"
+            f"⊘ Duplicates (skipped):  {len(self.duplicate_txns)}\n"
+            f"✗ Errors (skipped):      {len(self.error_txns)}"
+        )
+        if not messagebox.askyesno("Confirm Import", confirm_msg):
             return
         
         print("[IMPORT] Starting atomic import...")
@@ -562,44 +512,55 @@ Total Records:           {len(self.transactions)}
 
         print(f"[IMPORT] Complete - {imported} imported, {failed} failed")
         self._show_results(imported, failed, error_message=error_message)
-        
-        # Advance to step 3
         self._advance_to_step3()
     
     def _show_results(self, imported, failed, error_message: str = ""):
-        """Display import results"""
+        """Display import results with honest status (Stage 4)."""
+        status = build_import_status(
+            imported=imported,
+            failed=failed,
+            matched_count=len(self.matched_txns),
+            duplicate_count=len(self.duplicate_txns),
+            error_count=len(self.error_txns),
+            review_count=len(self.review_txns),
+            error_message=error_message,
+        )
+
         self.result_cards['imported'].configure(text=str(imported))
         self.result_cards['matched'].configure(text=str(len(self.matched_txns)))
         self.result_cards['duplicates'].configure(text=str(len(self.duplicate_txns)))
-        self.result_cards['errors'].configure(text=str(len(self.error_txns) + (1 if failed else 0)))
-        
+        self.result_cards['errors'].configure(
+            text=str(len(self.error_txns) + (1 if failed else 0))
+        )
+
+        rebuild_note = (
+            "Note: historical metric rebuild is deferred (Stage 5).\n"
+            "Dashboard values use live calculations from transactions."
+        )
         if failed:
-            status_line = "Status: ✗ IMPORT ROLLED BACK (no rows saved)"
-            rebuild_note = "Financial metrics were not recalculated."
-            fail_line = f"✗ Batch failures:        {failed}\n✗ Error: {error_message}\n"
-        else:
-            status_line = "Status: ✓ IMPORT SUCCESSFUL"
-            rebuild_note = (
-                "Note: historical metric rebuild is deferred (Stage 5).\n"
-                "Dashboard values use live calculations from transactions."
-            )
-            fail_line = ""
+            rebuild_note = "Financial metrics were not recalculated (batch rolled back)."
 
         result_text = f"""
 ╔════════════════════════════════════════════════════════════════════════════╗
-║                         IMPORT COMPLETED                                   ║
+║                         IMPORT RESULTS                                     ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
-✓ Imported:              {imported}
-⊘ Duplicates (skipped):  {len(self.duplicate_txns)}
-✗ Prefail errors (skip): {len(self.error_txns)}
-{fail_line}
+✓ Imported:                 {imported}
+✓ Matched (attempted):      {len(self.matched_txns)}
+⚠ Review (not imported):    {len(self.review_txns)}
+⊘ Duplicates (skipped):     {len(self.duplicate_txns)}
+✗ Errors (skipped):         {len(self.error_txns)}
+✗ Batch failures:           {failed}
+{('✗ Error detail: ' + error_message) if error_message else ''}
+
 {rebuild_note}
 
-{status_line}
+Status: {status['headline']}
+Detail: {status['detail']}
 """
         
         self.result_text.configure(state=NORMAL)
+        self.result_text.delete("1.0", "end")
         self.result_text.insert("1.0", result_text)
         self.result_text.configure(state=DISABLED)
     
