@@ -15,7 +15,12 @@ from services.excel_import_service import ExcelImportService
 from services.loan_matcher import LoanMatcher
 from services.duplicate_checker import DuplicateChecker
 from services.historical_rebuild_service import HistoricalRebuildService
-from services.import_classify import classify_import_rows, build_import_status
+from services.import_classify import (
+    classify_import_rows,
+    build_import_status,
+    apply_review_resolution,
+)
+from src.ui.ambiguous_match_dialog import AmbiguousMatchDialog
 import database as db
 
 # Colors
@@ -49,6 +54,7 @@ class ImportDialog(ctk.CTkToplevel):
         self.review_txns = []
         self.error_txns = []
         self.duplicate_txns = []
+        self.skipped_review_txns = []
         
         # Services
         self.excel_service = ExcelImportService()
@@ -208,6 +214,7 @@ Both formats are supported. Choose the one that's easiest for you.
         self.review_txns = result["review_txns"]
         self.duplicate_txns = result["duplicate_txns"]
         self.error_txns = result["error_txns"]
+        self.skipped_review_txns = []
         print(
             f"[VALIDATE] Results: {len(self.matched_txns)} matched, "
             f"{len(self.review_txns)} review, {len(self.duplicate_txns)} dup, "
@@ -311,8 +318,8 @@ Total Records:           {len(self.transactions)}
             self.preview_text.insert("end", "╚════════════════════════════════════════════════════════════════════════════╝\n")
             self.preview_text.insert(
                 "end",
-                "These rows are NOT imported in this step. "
-                "Manual loan selection is required (Ambiguous Match UI — Stage 7).\n\n",
+                "These rows require an explicit loan choice during Import "
+                "(Select or Skip). Nothing is assigned automatically.\n\n",
             )
             
             for item in self.review_txns[:5]:
@@ -442,44 +449,105 @@ Total Records:           {len(self.transactions)}
     # IMPORT EXECUTION
     # ════════════════════════════════════════════════════════════════════════════
     
+    def _resolve_review_txns(self) -> bool:
+        """
+        Present AmbiguousMatchDialog for each review row.
+        Returns False if the user cancels the whole import mid-resolution.
+        """
+        if not self.review_txns:
+            return True
+
+        pending = list(self.review_txns)
+        self.review_txns = []
+        self.skipped_review_txns = []
+
+        for item in pending:
+            txn = item["txn"]
+            due_day = txn.get("due_day")
+            dialog = AmbiguousMatchDialog(
+                self,
+                borrower_name=txn.get("borrower_name", ""),
+                candidates=item.get("candidates") or [],
+                txn_data=txn,
+                due_day=due_day,
+                reason=item.get("reason", ""),
+            )
+            self.wait_window(dialog)
+            selected, skipped = dialog.get_result()
+
+            # Window closed via WM without Select/Skip → treat as cancel import
+            if not skipped and selected is None:
+                # Put unresolved items back so user can retry
+                self.review_txns = pending
+                self.skipped_review_txns = []
+                messagebox.showinfo(
+                    "Import Cancelled",
+                    "Ambiguous match resolution was cancelled. No rows were imported.",
+                )
+                return False
+
+            outcome = apply_review_resolution(
+                item,
+                selected,
+                skipped,
+                self.duplicate_checker,
+                self.matched_txns,
+                self.duplicate_txns,
+                self.skipped_review_txns,
+            )
+            print(f"[REVIEW] row {txn.get('row_num')}: {outcome}")
+
+        return True
+
     def _start_import(self):
-        """Import matched transactions atomically (all-or-nothing)."""
-        if len(self.matched_txns) == 0:
-            if self.review_txns:
-                messagebox.showwarning(
-                    "Nothing to Import",
-                    f"{len(self.review_txns)} row(s) need manual review and will NOT be imported yet.\n\n"
-                    f"Duplicates skipped: {len(self.duplicate_txns)}\n"
-                    f"Errors skipped: {len(self.error_txns)}\n\n"
-                    "Resolve ambiguous matches in a later step (Stage 7)."
-                )
-            else:
-                messagebox.showwarning(
-                    "No Data",
-                    "No valid unambiguous transactions to import.\n\n"
-                    f"Duplicates skipped: {len(self.duplicate_txns)}\n"
-                    f"Errors skipped: {len(self.error_txns)}"
-                )
-            # Still show an honest results panel
+        """Resolve ambiguous rows, then import matched transactions atomically."""
+        if (
+            len(self.matched_txns) == 0
+            and len(self.review_txns) == 0
+        ):
+            messagebox.showwarning(
+                "No Data",
+                "No valid transactions to import.\n\n"
+                f"Duplicates skipped: {len(self.duplicate_txns)}\n"
+                f"Errors skipped: {len(self.error_txns)}"
+            )
             self._show_results(0, 0, error_message="")
             self._advance_to_step3()
             return
-        
+
         confirm_msg = (
-            f"Import {len(self.matched_txns)} matched transaction(s)?\n\n"
-            f"⚠ Review (NOT imported): {len(self.review_txns)}\n"
+            f"Continue import?\n\n"
+            f"✓ Ready (unambiguous):   {len(self.matched_txns)}\n"
+            f"⚠ Need your choice:      {len(self.review_txns)}\n"
             f"⊘ Duplicates (skipped):  {len(self.duplicate_txns)}\n"
-            f"✗ Errors (skipped):      {len(self.error_txns)}"
+            f"✗ Errors (skipped):      {len(self.error_txns)}\n\n"
+            "Ambiguous rows will prompt for Select or Skip before saving."
         )
         if not messagebox.askyesno("Confirm Import", confirm_msg):
             return
-        
+
+        # Stage 7: explicit resolution for every ambiguous row
+        if not self._resolve_review_txns():
+            return
+
+        if len(self.matched_txns) == 0:
+            messagebox.showwarning(
+                "Nothing to Import",
+                "No rows remain to import after review "
+                f"(skipped={len(self.skipped_review_txns)}, "
+                f"duplicates={len(self.duplicate_txns)}, "
+                f"errors={len(self.error_txns)})."
+            )
+            self._show_results(0, 0, error_message="")
+            self._advance_to_step3()
+            return
+
         print("[IMPORT] Starting atomic import...")
-        
+
         batch = []
         for item in self.matched_txns:
-            txn = item['txn']
-            loan = item['loan']
+            txn = item["txn"]
+            loan = item["loan"]
             batch.append({
                 "borrower_id": loan["borrower_id"],
                 "loan_id": loan["loan_id"],
@@ -507,17 +575,18 @@ Total Records:           {len(self.transactions)}
                     f"Import was rolled back. No transactions were saved.\n\n{error_message}"
                 )
 
-        # Rebuild / repair original principals after successful import (Stage 5)
-        print("[IMPORT] Rebuilding/repairing original principals...")
-        rebuild_result = self.rebuild_service.rebuild_all()
-        print(f"[IMPORT] Rebuild result: {rebuild_result}")
+        if imported and not failed:
+            print("[IMPORT] Rebuilding/repairing original principals...")
+            rebuild_result = self.rebuild_service.rebuild_all()
+            print(f"[IMPORT] Rebuild result: {rebuild_result}")
 
         print(f"[IMPORT] Complete - {imported} imported, {failed} failed")
         self._show_results(imported, failed, error_message=error_message)
         self._advance_to_step3()
-    
+
     def _show_results(self, imported, failed, error_message: str = ""):
-        """Display import results with honest status (Stage 4)."""
+        """Display import results with honest status."""
+        skipped_review = getattr(self, "skipped_review_txns", []) or []
         status = build_import_status(
             imported=imported,
             failed=failed,
@@ -526,12 +595,13 @@ Total Records:           {len(self.transactions)}
             error_count=len(self.error_txns),
             review_count=len(self.review_txns),
             error_message=error_message,
+            skipped_review_count=len(skipped_review),
         )
 
-        self.result_cards['imported'].configure(text=str(imported))
-        self.result_cards['matched'].configure(text=str(len(self.matched_txns)))
-        self.result_cards['duplicates'].configure(text=str(len(self.duplicate_txns)))
-        self.result_cards['errors'].configure(
+        self.result_cards["imported"].configure(text=str(imported))
+        self.result_cards["matched"].configure(text=str(len(self.matched_txns)))
+        self.result_cards["duplicates"].configure(text=str(len(self.duplicate_txns)))
+        self.result_cards["errors"].configure(
             text=str(len(self.error_txns) + (1 if failed else 0))
         )
 
@@ -541,6 +611,8 @@ Total Records:           {len(self.transactions)}
         )
         if failed:
             rebuild_note = "Financial metrics were not recalculated (batch rolled back)."
+        elif imported == 0:
+            rebuild_note = "No rebuild performed (nothing imported)."
 
         result_text = f"""
 ╔════════════════════════════════════════════════════════════════════════════╗
@@ -548,8 +620,9 @@ Total Records:           {len(self.transactions)}
 ╚════════════════════════════════════════════════════════════════════════════╝
 
 ✓ Imported:                 {imported}
-✓ Matched (attempted):      {len(self.matched_txns)}
-⚠ Review (not imported):    {len(self.review_txns)}
+✓ Matched (after review):   {len(self.matched_txns)}
+⚠ Review unresolved:        {len(self.review_txns)}
+⚠ Review skipped by user:   {len(skipped_review)}
 ⊘ Duplicates (skipped):     {len(self.duplicate_txns)}
 ✗ Errors (skipped):         {len(self.error_txns)}
 ✗ Batch failures:           {failed}
@@ -560,7 +633,7 @@ Total Records:           {len(self.transactions)}
 Status: {status['headline']}
 Detail: {status['detail']}
 """
-        
+
         self.result_text.configure(state=NORMAL)
         self.result_text.delete("1.0", "end")
         self.result_text.insert("1.0", result_text)

@@ -7,7 +7,7 @@ Does not create borrowers/loans. Does not open AmbiguousMatchDialog (Stage 7).
 
 from __future__ import annotations
 
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 from src.services.duplicate_checker import DuplicateChecker
 from src.services.loan_matcher import LoanMatcher
@@ -119,6 +119,52 @@ def classify_import_rows(
     }
 
 
+def apply_review_resolution(
+    review_item: Dict[str, Any],
+    selected_loan: Optional[dict],
+    skipped: bool,
+    duplicate_checker: DuplicateChecker,
+    matched_txns: List[Dict],
+    duplicate_txns: List[Dict],
+    skipped_review: List[Dict],
+) -> str:
+    """
+    Apply an explicit user resolution for one ambiguous row.
+
+    Returns: 'matched' | 'duplicate' | 'skipped' | 'invalid'
+
+    Never silently assigns a loan — selected_loan must be provided unless skipped.
+    """
+    txn = review_item["txn"]
+    if skipped or selected_loan is None:
+        skipped_review.append({
+            "txn": txn,
+            "reason": review_item.get("reason", "skipped by user"),
+        })
+        return "skipped"
+
+    # Guard: selected loan must be one of the candidates
+    candidate_ids = {c.get("loan_id") for c in review_item.get("candidates") or []}
+    if candidate_ids and selected_loan.get("loan_id") not in candidate_ids:
+        return "invalid"
+
+    dup_kind = duplicate_checker.classify_duplicate(txn, selected_loan["loan_id"])
+    if dup_kind:
+        duplicate_txns.append({
+            "txn": txn,
+            "loan": selected_loan,
+            "reason": dup_kind,
+        })
+        return "duplicate"
+
+    matched_txns.append({
+        "txn": txn,
+        "loan": selected_loan,
+    })
+    duplicate_checker.remember(txn, selected_loan["loan_id"])
+    return "matched"
+
+
 def build_import_status(
     imported: int,
     failed: int,
@@ -127,6 +173,7 @@ def build_import_status(
     error_count: int,
     review_count: int,
     error_message: str = "",
+    skipped_review_count: int = 0,
 ) -> Dict[str, str]:
     """
     Honest status summary for the results step / tests.
@@ -141,8 +188,10 @@ def build_import_status(
         }
     if imported > 0:
         extra = []
+        if skipped_review_count:
+            extra.append(f"{skipped_review_count} ambiguous row(s) skipped by user")
         if review_count:
-            extra.append(f"{review_count} row(s) still need manual review (not imported)")
+            extra.append(f"{review_count} review row(s) still unresolved")
         if duplicate_count:
             extra.append(f"{duplicate_count} duplicate(s) skipped")
         if error_count:
@@ -153,11 +202,20 @@ def build_import_status(
             "detail": "; ".join(extra) if extra else "All matched rows imported",
         }
     # imported == 0, not failed
-    if review_count and matched_count == 0:
+    if review_count and matched_count == 0 and not skipped_review_count:
         return {
             "status": "review_only",
             "headline": "NO ROWS IMPORTED — manual review required",
             "detail": f"{review_count} ambiguous row(s) were not imported",
+        }
+    if skipped_review_count and matched_count == 0:
+        return {
+            "status": "nothing_imported",
+            "headline": "NO ROWS IMPORTED",
+            "detail": (
+                f"user skipped {skipped_review_count} ambiguous row(s); "
+                f"duplicates={duplicate_count}, errors={error_count}"
+            ),
         }
     if duplicate_count or error_count:
         return {
@@ -165,7 +223,7 @@ def build_import_status(
             "headline": "NO ROWS IMPORTED",
             "detail": (
                 f"duplicates={duplicate_count}, errors={error_count}, "
-                f"review={review_count}"
+                f"review={review_count}, skipped_review={skipped_review_count}"
             ),
         }
     return {

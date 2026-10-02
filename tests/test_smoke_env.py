@@ -30,6 +30,7 @@ def test_venv_imports():
     from src.services import duplicate_checker
     from src.services import historical_rebuild_service
     from src.ui import import_dialog
+    from src.ui import ambiguous_match_dialog
 
     assert database.DB_PATH.endswith("lendtrack.db")
     assert excel_import_service.ExcelImportService is not None
@@ -37,17 +38,12 @@ def test_venv_imports():
     assert duplicate_checker.DuplicateChecker is not None
     assert historical_rebuild_service.HistoricalRebuildService is not None
     assert import_dialog.ImportDialog is not None
+    assert ambiguous_match_dialog.AmbiguousMatchDialog is not None
     assert ui_dashboard.DashboardFrame is not None
     assert ui_borrowers.BorrowersFrame is not None
     assert ui_loans.LoansFrame is not None
     assert ui_transactions.TransactionsFrame is not None
     assert ui_reports.ReportsFrame is not None
-
-    # ambiguous_match_dialog.py currently fails to import due to a pre-existing
-    # missing `Tuple` annotation import (product bug for Stage 7). Stage 0 only
-    # verifies the file is present — do not "fix" that bug here.
-    amb_path = os.path.join(ROOT, "src", "ui", "ambiguous_match_dialog.py")
-    assert os.path.isfile(amb_path)
 
 
 def test_initialize_db_creates_tables(initialized_temp_db):
