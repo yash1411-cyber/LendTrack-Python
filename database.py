@@ -31,7 +31,7 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
 # ──────────────────────────────────────────────
 
 def initialize_db():
-    """Create all tables on first run if they do not exist."""
+    """Create all tables on first run if they do not exist, then repair principals."""
     conn = get_connection()
     c = conn.cursor()
 
@@ -49,7 +49,7 @@ def initialize_db():
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             loan_id         TEXT UNIQUE NOT NULL,  -- L001, L002 …
             borrower_id     TEXT NOT NULL REFERENCES borrowers(borrower_id),
-            principal       REAL NOT NULL,
+            principal       REAL NOT NULL,          -- ORIGINAL principal (not reduced by repayments)
             interest_rate   REAL NOT NULL,   -- monthly % e.g. 3.0
             due_day         INTEGER NOT NULL CHECK(due_day BETWEEN 1 AND 31),
             start_date      TEXT,
@@ -82,6 +82,8 @@ def initialize_db():
 
     conn.commit()
     conn.close()
+    # Ensure loans.principal reflects original (Loan Given), not a legacy mutated balance
+    repair_loan_principals()
 
 
 # ──────────────────────────────────────────────
@@ -187,14 +189,40 @@ def add_loan(borrower_id: str, principal: float, interest_rate: float,
 
 def update_loan(loan_id: str, principal: float, interest_rate: float,
                 due_day: int, start_date: str, status: str):
+    """
+    Update loan fields. `principal` is the ORIGINAL principal.
+    Syncs the Loan Given transaction amount. Rejects principal below repayments.
+    """
     conn = get_connection()
-    conn.execute(
-        """UPDATE loans SET principal=?, interest_rate=?, due_day=?, start_date=?, status=?
-           WHERE loan_id=?""",
-        (principal, interest_rate, due_day, start_date, status, loan_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        received = _txn_sum(conn, loan_id, "Principal Received")
+        if float(principal) + 1e-9 < received:
+            raise ValueError(
+                f"Original principal ({principal}) cannot be less than "
+                f"principal already repaid ({received})."
+            )
+        conn.execute(
+            """UPDATE loans SET principal=?, interest_rate=?, due_day=?, start_date=?, status=?
+               WHERE loan_id=?""",
+            (principal, interest_rate, due_day, start_date, status, loan_id)
+        )
+        lg = conn.execute(
+            """SELECT id FROM transactions
+               WHERE loan_id=? AND txn_type='Loan Given'
+               ORDER BY id ASC LIMIT 1""",
+            (loan_id,)
+        ).fetchone()
+        if lg:
+            conn.execute(
+                "UPDATE transactions SET amount=? WHERE id=?",
+                (float(principal), lg["id"])
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def delete_loan(loan_id: str):
@@ -218,43 +246,141 @@ def delete_loan(loan_id: str):
 
 def get_loans_for_borrower(borrower_id: str) -> list:
     conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM loans WHERE borrower_id=? ORDER BY id",
-        (borrower_id,)
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute(
+            "SELECT * FROM loans WHERE borrower_id=? ORDER BY id",
+            (borrower_id,)
+        ).fetchall()
+        return [enrich_loan(dict(r), conn) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_all_loans(status_filter: str = "") -> list:
     conn = get_connection()
-    if status_filter:
-        rows = conn.execute(
-            """SELECT l.*, b.name as borrower_name FROM loans l
-               JOIN borrowers b ON l.borrower_id = b.borrower_id
-               WHERE l.status=? ORDER BY l.id""",
-            (status_filter,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """SELECT l.*, b.name as borrower_name FROM loans l
-               JOIN borrowers b ON l.borrower_id = b.borrower_id
-               ORDER BY l.id"""
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        if status_filter:
+            rows = conn.execute(
+                """SELECT l.*, b.name as borrower_name FROM loans l
+                   JOIN borrowers b ON l.borrower_id = b.borrower_id
+                   WHERE l.status=? ORDER BY l.id""",
+                (status_filter,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT l.*, b.name as borrower_name FROM loans l
+                   JOIN borrowers b ON l.borrower_id = b.borrower_id
+                   ORDER BY l.id"""
+            ).fetchall()
+        return [enrich_loan(dict(r), conn) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_loan(loan_id: str) -> Optional[dict]:
     conn = get_connection()
+    try:
+        row = conn.execute(
+            """SELECT l.*, b.name as borrower_name FROM loans l
+               JOIN borrowers b ON l.borrower_id = b.borrower_id
+               WHERE l.loan_id=?""",
+            (loan_id,)
+        ).fetchone()
+        return enrich_loan(dict(row), conn) if row else None
+    finally:
+        conn.close()
+
+
+# ──────────────────────────────────────────────
+# PRINCIPAL / OUTSTANDING (Stage 5)
+# ──────────────────────────────────────────────
+
+SUPPORTED_TXN_TYPES = {
+    "Interest Received",
+    "Principal Received",
+    "Loan Given",
+}
+
+
+def _txn_sum(conn: sqlite3.Connection, loan_id: str, txn_type: str) -> float:
     row = conn.execute(
-        """SELECT l.*, b.name as borrower_name FROM loans l
-           JOIN borrowers b ON l.borrower_id = b.borrower_id
-           WHERE l.loan_id=?""",
-        (loan_id,)
+        """SELECT COALESCE(SUM(amount), 0) AS total FROM transactions
+           WHERE loan_id=? AND txn_type=?""",
+        (loan_id, txn_type)
     ).fetchone()
-    conn.close()
-    return dict(row) if row else None
+    return float(row["total"])
+
+
+def get_original_principal(loan_id: str, loan_row: dict = None,
+                           conn: sqlite3.Connection = None) -> float:
+    """Original principal from Loan Given (fallback: loans.principal)."""
+    own = conn is None
+    if own:
+        conn = get_connection()
+    try:
+        given = _txn_sum(conn, loan_id, "Loan Given")
+        if given > 0:
+            return given
+        if loan_row is not None and loan_row.get("principal") is not None:
+            return float(loan_row["principal"])
+        row = conn.execute(
+            "SELECT principal FROM loans WHERE loan_id=?", (loan_id,)
+        ).fetchone()
+        return float(row["principal"]) if row else 0.0
+    finally:
+        if own:
+            conn.close()
+
+
+def get_outstanding_principal(loan_id: str, loan_row: dict = None,
+                              conn: sqlite3.Connection = None) -> float:
+    """Outstanding = original principal − Principal Received (never below 0)."""
+    own = conn is None
+    if own:
+        conn = get_connection()
+    try:
+        original = get_original_principal(loan_id, loan_row, conn)
+        received = _txn_sum(conn, loan_id, "Principal Received")
+        return max(0.0, round(original - received, 2))
+    finally:
+        if own:
+            conn.close()
+
+
+def enrich_loan(loan: dict, conn: sqlite3.Connection = None) -> dict:
+    """Attach original_principal and outstanding_principal to a loan dict."""
+    out = dict(loan)
+    lid = out["loan_id"]
+    out["original_principal"] = get_original_principal(lid, out, conn)
+    out["outstanding_principal"] = get_outstanding_principal(lid, out, conn)
+    return out
+
+
+def repair_loan_principals(db_path: str = None) -> int:
+    """
+    Set loans.principal to the Loan Given total for each loan.
+    Repairs DBs previously mutated by Principal Received updates.
+    Returns number of rows updated.
+    """
+    conn = get_connection(db_path)
+    try:
+        updated = 0
+        for loan in conn.execute("SELECT loan_id, principal FROM loans").fetchall():
+            lid = loan["loan_id"]
+            given = _txn_sum(conn, lid, "Loan Given")
+            if given > 0 and abs(float(loan["principal"]) - given) > 1e-9:
+                conn.execute(
+                    "UPDATE loans SET principal=? WHERE loan_id=?",
+                    (given, lid)
+                )
+                updated += 1
+        conn.commit()
+        return updated
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ──────────────────────────────────────────────
@@ -277,23 +403,40 @@ def _apply_transaction(conn: sqlite3.Connection, borrower_id: str, loan_id: str,
                        txn_type: str, amount: float, txn_date: str,
                        notes: str = "", payment_mode: str = None) -> None:
     """
-    Insert one transaction (and principal side-effect) on an open connection.
+    Insert one transaction on an open connection.
     Does not commit — caller owns the transaction boundary.
+
+    loans.principal is NEVER mutated here. Outstanding is derived from transactions.
+    Adjustment is rejected (unsupported).
     """
+    if txn_type == "Adjustment":
+        raise ValueError(
+            "Adjustment transactions are not supported. "
+            "Use Principal Received or Interest Received."
+        )
+    if txn_type not in SUPPORTED_TXN_TYPES:
+        raise ValueError(
+            f"Unsupported transaction type: {txn_type}. "
+            f"Must be one of: {', '.join(sorted(SUPPORTED_TXN_TYPES))}"
+        )
     if amount is None or float(amount) <= 0:
         raise ValueError(f"Amount must be positive, got: {amount}")
     amount = float(amount)
+
+    if txn_type == "Principal Received" and loan_id:
+        outstanding = get_outstanding_principal(loan_id, conn=conn)
+        if amount - outstanding > 1e-9:
+            raise ValueError(
+                f"Principal Received ({amount}) exceeds outstanding ({outstanding}) "
+                f"for loan {loan_id}."
+            )
+
     composed = _compose_notes(notes, payment_mode)
     conn.execute(
         """INSERT INTO transactions (borrower_id, loan_id, txn_type, amount, txn_date, notes)
            VALUES (?,?,?,?,?,?)""",
         (borrower_id, loan_id, txn_type, amount, txn_date, composed)
     )
-    if txn_type == "Principal Received" and loan_id:
-        conn.execute(
-            "UPDATE loans SET principal = MAX(0, principal - ?) WHERE loan_id=?",
-            (amount, loan_id)
-        )
 
 
 def add_transaction(borrower_id: str, loan_id: str, txn_type: str,
@@ -378,7 +521,11 @@ def get_transactions_for_borrower(borrower_id: str) -> list:
 
 
 def delete_transaction(txn_id: int):
-    """Delete a transaction. Note: does not reverse principal changes."""
+    """
+    Delete a transaction.
+    Outstanding/interest are derived from remaining transactions (Stage 5),
+    so no loans.principal mutation is reversed here.
+    """
     conn = get_connection()
     conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
     conn.commit()
@@ -390,8 +537,14 @@ def delete_transaction(txn_id: int):
 # ──────────────────────────────────────────────
 
 def expected_monthly_interest(loan: dict) -> float:
-    """Simple monthly interest = principal × rate / 100. No compounding."""
-    return round(loan["principal"] * loan["interest_rate"] / 100, 2)
+    """
+    Monthly interest = outstanding principal × rate / 100.
+    No compounding. Outstanding is derived from transactions.
+    """
+    outstanding = loan.get("outstanding_principal")
+    if outstanding is None:
+        outstanding = get_outstanding_principal(loan["loan_id"], loan)
+    return round(float(outstanding) * float(loan["interest_rate"]) / 100, 2)
 
 
 def get_interest_received_for_loan(loan_id: str,
@@ -419,8 +572,8 @@ def get_interest_received_for_loan(loan_id: str,
 def compute_pending_interest(loan: dict) -> float:
     """
     Pending interest = accumulated expected interest - total interest received.
-    Interest is calculated monthly from start_date (or first txn date).
-    Does NOT compound: interest only on principal.
+    Expected uses current outstanding × rate × months since start (due-day gated).
+    Does NOT compound.
     """
     start_str = loan.get("start_date") or loan.get("created_at", str(date.today()))
     try:
@@ -450,17 +603,15 @@ def get_dashboard_summary() -> dict:
     today = str(date.today())
     month_start = date.today().replace(day=1).isoformat()
 
-    # Total outstanding principal
-    total_principal = conn.execute(
-        "SELECT COALESCE(SUM(principal),0) as v FROM loans WHERE status='Active'"
-    ).fetchone()["v"]
-
-    # Expected monthly interest across all active loans
-    active_loans = conn.execute(
+    active_rows = conn.execute(
         "SELECT * FROM loans WHERE status='Active'"
     ).fetchall()
+    active_loans = [enrich_loan(dict(l), conn) for l in active_rows]
+
+    total_principal = sum(l["outstanding_principal"] for l in active_loans)
+
     total_expected_interest = sum(
-        expected_monthly_interest(dict(l)) for l in active_loans
+        expected_monthly_interest(l) for l in active_loans
     )
 
     # Interest received this month
@@ -479,18 +630,12 @@ def get_dashboard_summary() -> dict:
 
     conn.close()
 
-    # Total pending interest (computed per loan)
     total_overdue = sum(
-        compute_pending_interest(dict(l)) for l in active_loans
+        compute_pending_interest(l) for l in active_loans
     )
 
-    # Borrowers with due today
     today_day = date.today().day
-    due_today = [
-        dict(l) for l in active_loans
-        if l["due_day"] == today_day
-    ]
-    # Enrich with borrower names
+    due_today = [l for l in active_loans if l["due_day"] == today_day]
     for l in due_today:
         b = get_borrower(l["borrower_id"])
         l["borrower_name"] = b["name"] if b else l["borrower_id"]
@@ -525,7 +670,9 @@ def get_report_data() -> list:
             t["amount"] for t in get_transactions_for_borrower(b["borrower_id"])
             if t["txn_type"] == "Principal Received"
         )
-        outstanding_principal = sum(l["principal"] for l in loans if l["status"] == "Active")
+        outstanding_principal = sum(
+            l["outstanding_principal"] for l in loans if l["status"] == "Active"
+        )
         expected_interest = sum(
             expected_monthly_interest(l) for l in loans if l["status"] == "Active"
         )

@@ -118,13 +118,13 @@ def seed_all() -> dict:
     # Loan used for display-name-after-repayment: Prem already has primary;
     # use Anita? Better: dedicated partial-repayment on Prem's loan via extra txn,
     # OR add second loan for Prem. Use Sneha? Use a dedicated loan on Anita with partial.
-    # Create partial repayment on l_anita so principal mutates (display name changes).
+    # Create partial repayment on l_anita (outstanding drops; original principal preserved)
     db.add_transaction(
         b["Anita Desai"], l_anita, "Interest Received", 1250.0, D_TXN_INTEREST_1, "synthetic interest"
     )
     db.add_transaction(
         b["Anita Desai"], l_anita, "Principal Received", 10000.0, D_TXN_PRINCIPAL_PARTIAL,
-        "synthetic partial principal — mutates loans.principal for display-name drift"
+        "synthetic partial principal — outstanding derived, original preserved"
     )
 
     # Prem — interest transactions (exact match interest import target)
@@ -148,11 +148,11 @@ def seed_all() -> dict:
         b["Vikram Mehta"], l_vikram, "Principal Received", 30000.0, D_TXN_CLOSED_PRI,
         "synthetic full repayment"
     )
-    # After full principal received, loans.principal should be 0; mark Closed
+    # After full principal received, outstanding is 0; mark Closed (original principal retained)
     vloan = db.get_loan(l_vikram)
     db.update_loan(
         l_vikram,
-        vloan["principal"],
+        vloan["original_principal"],
         vloan["interest_rate"],
         vloan["due_day"],
         vloan["start_date"],

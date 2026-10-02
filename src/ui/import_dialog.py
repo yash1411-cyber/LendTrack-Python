@@ -507,8 +507,10 @@ Total Records:           {len(self.transactions)}
                     f"Import was rolled back. No transactions were saved.\n\n{error_message}"
                 )
 
-        # Historical rebuild is deferred to Stage 5 (schema/principal model mismatch).
-        print("[IMPORT] Skipping historical rebuild (deferred to Stage 5)")
+        # Rebuild / repair original principals after successful import (Stage 5)
+        print("[IMPORT] Rebuilding/repairing original principals...")
+        rebuild_result = self.rebuild_service.rebuild_all()
+        print(f"[IMPORT] Rebuild result: {rebuild_result}")
 
         print(f"[IMPORT] Complete - {imported} imported, {failed} failed")
         self._show_results(imported, failed, error_message=error_message)
@@ -534,8 +536,8 @@ Total Records:           {len(self.transactions)}
         )
 
         rebuild_note = (
-            "Note: historical metric rebuild is deferred (Stage 5).\n"
-            "Dashboard values use live calculations from transactions."
+            "Original principals were repaired from Loan Given transactions.\n"
+            "Outstanding balances and interest use live derived calculations."
         )
         if failed:
             rebuild_note = "Financial metrics were not recalculated (batch rolled back)."

@@ -60,7 +60,7 @@ class DashboardFrame(ctk.CTkFrame):
         cards_frame.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
 
         card_defs = [
-            ("total_principal",         "Total Principal",       ACCENT, "🏦"),
+            ("total_principal",         "Total Outstanding",     ACCENT, "🏦"),
             ("expected_monthly_interest","Expected Interest/Mo",  GREEN,  "📈"),
             ("interest_this_month",     "Interest Received",     GREEN,  "✅"),
             ("principal_this_month",    "Principal Received",    AMBER,  "💰"),
@@ -166,7 +166,7 @@ class DashboardFrame(ctk.CTkFrame):
             vals = [
                 loan["loan_id"],
                 loan.get("borrower_name", loan["borrower_id"]),
-                _fmt(loan["principal"]),
+                _fmt(loan.get("outstanding_principal", loan["principal"])),
                 f"{loan['interest_rate']}%",
                 f"{_fmt(exp)}{pending_txt}",
             ]

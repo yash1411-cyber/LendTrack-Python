@@ -68,9 +68,9 @@ class LoansFrame(ctk.CTkFrame):
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
 
-        cols    = ["Loan ID", "Borrower", "Principal", "Rate", "Due Day",
+        cols    = ["Loan ID", "Borrower", "Original", "Outstanding", "Rate", "Due Day",
                    "Exp. Interest", "Pending", "Status", "Actions"]
-        weights = [1, 2, 2, 1, 1, 2, 2, 1, 1]
+        weights = [1, 2, 2, 2, 1, 1, 2, 2, 1, 1]
 
         tbl = ctk.CTkScrollableFrame(content, fg_color=CARD,
                                      corner_radius=14,
@@ -100,34 +100,36 @@ class LoansFrame(ctk.CTkFrame):
             lbl = ctk.CTkLabel(self._tbl, text="No loans yet. Click '+ New Loan' to add one.",
                                text_color=MUTED,
                                font=ctk.CTkFont("Segoe UI", 13))
-            lbl.grid(row=1, column=0, columnspan=9, pady=32)
+            lbl.grid(row=1, column=0, columnspan=10, pady=32)
             self._row_widgets.append(lbl)
             return
 
         for ri, l in enumerate(loans, start=1):
             bg = CARD if ri % 2 == 0 else CARD2
             rf = ctk.CTkFrame(self._tbl, fg_color=bg, corner_radius=0)
-            rf.grid(row=ri, column=0, columnspan=9, sticky="ew")
-            for ci in range(9):
-                rf.grid_columnconfigure(ci, weight=[1,2,2,1,1,2,2,1,1][ci])
+            rf.grid(row=ri, column=0, columnspan=10, sticky="ew")
+            for ci in range(10):
+                rf.grid_columnconfigure(ci, weight=[1,2,2,2,1,1,2,2,1,1][ci])
             self._row_widgets.append(rf)
 
             exp     = db.expected_monthly_interest(l)
             pending = db.compute_pending_interest(l) if l["status"] == "Active" else 0
             status_color  = GREEN if l["status"] == "Active" else MUTED
             pending_color = RED if pending > 0 else TEXT
+            original = l.get("original_principal", l["principal"])
+            outstanding = l.get("outstanding_principal", l["principal"])
 
-            vals   = [l["loan_id"], l["borrower_name"], _fmt(l["principal"]),
+            vals   = [l["loan_id"], l["borrower_name"], _fmt(original), _fmt(outstanding),
                       f"{l['interest_rate']}%", str(l["due_day"]),
                       _fmt(exp), _fmt(pending), l["status"]]
-            colors = [TEXT, TEXT, TEXT, TEXT, TEXT, GREEN, pending_color, status_color]
+            colors = [TEXT, TEXT, TEXT, ACCENT, TEXT, TEXT, GREEN, pending_color, status_color]
             for ci, (v, col) in enumerate(zip(vals, colors)):
                 ctk.CTkLabel(rf, text=v,
                              font=ctk.CTkFont("Segoe UI", 12),
                              text_color=col).grid(row=0, column=ci,
                                                   padx=10, pady=8, sticky="w")
             af = ctk.CTkFrame(rf, fg_color="transparent")
-            af.grid(row=0, column=8, padx=6, pady=4)
+            af.grid(row=0, column=9, padx=6, pady=4)
             ctk.CTkButton(af, text="Edit", width=52, height=26,
                           fg_color=ACCENT, hover_color="#3A72D8",
                           font=ctk.CTkFont("Segoe UI", 11),
@@ -228,7 +230,7 @@ class LoanDialog(ctk.CTkToplevel):
 
         # ── Input fields ──────────────────────────────────────────────────
         fields = [
-            ("Principal Amount *", "principal", "e.g. 100000"),
+            ("Original Principal *", "principal", "e.g. 100000"),
             ("Interest Rate % *",  "interest",  "e.g. 3.0"),
             ("Due Day (1-31) *",   "due_day",   "e.g. 5"),
             ("Start Date",         "start_date", str(date.today())),
@@ -265,7 +267,7 @@ class LoanDialog(ctk.CTkToplevel):
 
         # Pre-fill when editing
         if self._mode == "edit" and self._loan:
-            self._entries["principal"].insert(0, str(self._loan["principal"]))
+            self._entries["principal"].insert(0, str(self._loan.get("original_principal", self._loan["principal"])))
             self._entries["interest"].insert(0,  str(self._loan["interest_rate"]))
             self._entries["due_day"].insert(0,   str(self._loan["due_day"]))
             self._entries["start_date"].insert(0, self._loan.get("start_date", "") or "")
@@ -342,9 +344,13 @@ class LoanDialog(ctk.CTkToplevel):
                 f"Monthly Int : Rs.{principal*interest/100:,.0f}"
             )
         else:
-            db.update_loan(self._loan["loan_id"], principal, interest,
-                           due_day, start_date, status)
-            messagebox.showinfo("Updated", "Loan updated successfully!")
+            try:
+                db.update_loan(self._loan["loan_id"], principal, interest,
+                               due_day, start_date, status)
+                messagebox.showinfo("Updated", "Loan updated successfully!")
+            except ValueError as e:
+                messagebox.showerror("Invalid Principal", str(e))
+                return
 
         if self._on_save:
             self._on_save()

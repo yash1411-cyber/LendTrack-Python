@@ -192,8 +192,8 @@ class TransactionsFrame(ctk.CTkFrame):
         except Exception:
             return
         loans = db.get_loans_for_borrower(bid)
-        opts = [f"{l['loan_id']} (₹{l['principal']:,.0f})" for l in loans
-                if l["status"] == "Active"]
+        opts = [f"{l['loan_id']} (₹{l.get('outstanding_principal', l['principal']):,.0f} due)"
+                for l in loans if l["status"] == "Active"]
         self._loan_dd.configure(values=opts or ["—"])
         if opts:
             self._loan_var.set(opts[0])
