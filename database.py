@@ -212,12 +212,22 @@ def update_loan(loan_id: str, principal: float, interest_rate: float,
                 due_day: int, start_date: str, status: str):
     """
     Update loan fields. `principal` is the ORIGINAL principal.
-    Syncs the Loan Given transaction amount. Rejects principal below repayments.
+
+    Syncs the single foundational Loan Given row (amount + txn_date) to match.
+    NEVER inserts an additional Loan Given when one already exists — editing a
+    loan must not create a new disbursement transaction.
     """
     conn = get_connection()
     try:
+        loan_row = conn.execute(
+            "SELECT borrower_id, principal FROM loans WHERE loan_id=?", (loan_id,)
+        ).fetchone()
+        if not loan_row:
+            raise ValueError(f"Loan {loan_id} not found")
+
+        principal = float(principal)
         received = _txn_sum(conn, loan_id, "Principal Received")
-        if float(principal) + 1e-9 < received:
+        if principal + 1e-9 < received:
             raise ValueError(
                 f"Original principal ({principal}) cannot be less than "
                 f"principal already repaid ({received})."
@@ -227,17 +237,109 @@ def update_loan(loan_id: str, principal: float, interest_rate: float,
                WHERE loan_id=?""",
             (principal, interest_rate, due_day, start_date, status, loan_id)
         )
-        lg = conn.execute(
-            """SELECT id FROM transactions
-               WHERE loan_id=? AND txn_type='Loan Given'
-               ORDER BY id ASC LIMIT 1""",
-            (loan_id,)
+        _sync_foundational_loan_given(
+            conn,
+            loan_id=loan_id,
+            borrower_id=loan_row["borrower_id"],
+            principal=principal,
+            start_date=start_date or "",
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _sync_foundational_loan_given(
+    conn: sqlite3.Connection,
+    loan_id: str,
+    borrower_id: str,
+    principal: float,
+    start_date: str,
+) -> None:
+    """
+    Ensure exactly one foundational Loan Given exists and matches principal.
+
+    - If one or more exist: update the earliest row; remove any extras.
+    - If none exist (legacy): insert exactly one.
+    Editing must never leave multiple Loan Given rows for the same loan.
+    """
+    rows = conn.execute(
+        """SELECT id FROM transactions
+           WHERE loan_id=? AND txn_type='Loan Given'
+           ORDER BY id ASC""",
+        (loan_id,),
+    ).fetchall()
+    txn_date = start_date or str(date.today())
+
+    if not rows:
+        conn.execute(
+            """INSERT INTO transactions
+               (borrower_id, loan_id, txn_type, amount, txn_date, notes)
+               VALUES (?,?,?,?,?,?)""",
+            (borrower_id, loan_id, "Loan Given", principal, txn_date, ""),
+        )
+        return
+
+    foundational_id = rows[0]["id"]
+    conn.execute(
+        "UPDATE transactions SET amount=?, txn_date=? WHERE id=?",
+        (principal, txn_date, foundational_id),
+    )
+    if len(rows) > 1:
+        extra_ids = [r["id"] for r in rows[1:]]
+        conn.executemany(
+            "DELETE FROM transactions WHERE id=?",
+            [(eid,) for eid in extra_ids],
+        )
+
+
+def close_loan(loan_id: str):
+    """
+    Mark a loan Closed without deleting transactions or changing identity fields.
+
+    Principal, due day, start date, and Loan Given are left untouched so the
+    loan remains matchable for historical imports after close/reopen.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT loan_id FROM loans WHERE loan_id=?", (loan_id,)
         ).fetchone()
-        if lg:
-            conn.execute(
-                "UPDATE transactions SET amount=? WHERE id=?",
-                (float(principal), lg["id"])
-            )
+        if not row:
+            raise ValueError(f"Loan {loan_id} not found")
+        conn.execute(
+            "UPDATE loans SET status=? WHERE loan_id=?",
+            ("Closed", loan_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def reopen_loan(loan_id: str):
+    """
+    Reopen a Closed loan by setting status=Active only.
+
+    Does not create a new loan or Loan Given, and does not alter principal,
+    due day, or start date (matching identity is preserved).
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT loan_id, status FROM loans WHERE loan_id=?", (loan_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Loan {loan_id} not found")
+        conn.execute(
+            "UPDATE loans SET status=? WHERE loan_id=?",
+            ("Active", loan_id),
+        )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -269,21 +371,6 @@ def delete_loan(loan_id: str):
         raise
     finally:
         conn.close()
-
-
-def close_loan(loan_id: str):
-    """Mark a loan Closed without deleting transactions."""
-    loan = get_loan(loan_id)
-    if not loan:
-        raise ValueError(f"Loan {loan_id} not found")
-    update_loan(
-        loan_id,
-        loan.get("original_principal", loan["principal"]),
-        loan["interest_rate"],
-        loan["due_day"],
-        loan.get("start_date") or "",
-        "Closed",
-    )
 
 
 def get_loans_for_borrower(borrower_id: str) -> list:
@@ -353,22 +440,40 @@ def _txn_sum(conn: sqlite3.Connection, loan_id: str, txn_type: str) -> float:
     return float(row["total"])
 
 
+def _foundational_loan_given_amount(
+    conn: sqlite3.Connection, loan_id: str
+) -> Optional[float]:
+    """Amount of the earliest Loan Given for a loan, or None if missing."""
+    row = conn.execute(
+        """SELECT amount FROM transactions
+           WHERE loan_id=? AND txn_type='Loan Given'
+           ORDER BY id ASC LIMIT 1""",
+        (loan_id,),
+    ).fetchone()
+    return float(row["amount"]) if row else None
+
+
 def get_original_principal(loan_id: str, loan_row: dict = None,
                            conn: sqlite3.Connection = None) -> float:
-    """Original principal from Loan Given (fallback: loans.principal)."""
+    """
+    Original principal for a loan (Stage 5).
+
+    Canonical source is loans.principal. The foundational (earliest) Loan Given
+    is a fallback for legacy rows — never SUM multiple Loan Given rows.
+    """
     own = conn is None
     if own:
         conn = get_connection()
     try:
-        given = _txn_sum(conn, loan_id, "Loan Given")
-        if given > 0:
-            return given
         if loan_row is not None and loan_row.get("principal") is not None:
             return float(loan_row["principal"])
         row = conn.execute(
             "SELECT principal FROM loans WHERE loan_id=?", (loan_id,)
         ).fetchone()
-        return float(row["principal"]) if row else 0.0
+        if row is not None and row["principal"] is not None:
+            return float(row["principal"])
+        given = _foundational_loan_given_amount(conn, loan_id)
+        return given if given is not None else 0.0
     finally:
         if own:
             conn.close()
@@ -400,8 +505,10 @@ def enrich_loan(loan: dict, conn: sqlite3.Connection = None) -> dict:
 
 def repair_loan_principals(db_path: str = None) -> int:
     """
-    Set loans.principal to the Loan Given total for each loan.
+    Set loans.principal from the foundational (earliest) Loan Given amount.
+
     Repairs DBs previously mutated by Principal Received updates.
+    Does NOT sum multiple Loan Given rows (that would inflate principal).
     Returns number of rows updated.
     """
     conn = get_connection(db_path)
@@ -409,8 +516,8 @@ def repair_loan_principals(db_path: str = None) -> int:
         updated = 0
         for loan in conn.execute("SELECT loan_id, principal FROM loans").fetchall():
             lid = loan["loan_id"]
-            given = _txn_sum(conn, lid, "Loan Given")
-            if given > 0 and abs(float(loan["principal"]) - given) > 1e-9:
+            given = _foundational_loan_given_amount(conn, lid)
+            if given is not None and abs(float(loan["principal"]) - given) > 1e-9:
                 conn.execute(
                     "UPDATE loans SET principal=? WHERE loan_id=?",
                     (given, lid)
@@ -464,6 +571,21 @@ def _apply_transaction(conn: sqlite3.Connection, borrower_id: str, loan_id: str,
     if amount is None or float(amount) <= 0:
         raise ValueError(f"Amount must be positive, got: {amount}")
     amount = float(amount)
+
+    if txn_type == "Loan Given":
+        if not loan_id:
+            raise ValueError("Loan Given requires a loan_id.")
+        existing = conn.execute(
+            """SELECT COUNT(*) AS c FROM transactions
+               WHERE loan_id=? AND txn_type='Loan Given'""",
+            (loan_id,),
+        ).fetchone()["c"]
+        if existing:
+            raise ValueError(
+                "Loan Given already exists for this loan. "
+                "Editing a loan must not create another Loan Given. "
+                "Change original principal via Edit Loan if needed."
+            )
 
     if txn_type == "Principal Received" and loan_id:
         outstanding = get_outstanding_principal(loan_id, conn=conn)

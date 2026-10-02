@@ -19,7 +19,7 @@ TEXT  = "#E8EBF2"
 MUTED = "#7A849E"
 BORDER= "#2C3347"
 
-TXN_TYPES = ["Interest Received", "Principal Received", "Loan Given"]
+TXN_TYPES = ["Interest Received", "Principal Received"]
 TXN_COLORS = {"Interest Received": GREEN,
                "Principal Received": ACCENT,
                "Loan Given": AMBER}

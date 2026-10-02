@@ -37,12 +37,16 @@ class LoanMatcher:
             """).fetchall()
 
             loan_given = {
-                r["loan_id"]: r["total"]
+                r["loan_id"]: float(r["amount"])
                 for r in c.execute("""
-                    SELECT loan_id, COALESCE(SUM(amount), 0) AS total
+                    SELECT loan_id, amount
                     FROM transactions
                     WHERE txn_type = 'Loan Given'
-                    GROUP BY loan_id
+                      AND id IN (
+                          SELECT MIN(id) FROM transactions
+                          WHERE txn_type = 'Loan Given'
+                          GROUP BY loan_id
+                      )
                 """).fetchall()
             }
             principal_received = {
@@ -61,18 +65,24 @@ class LoanMatcher:
             for row in rows:
                 loan_dict = dict(row)
                 lid = loan_dict["loan_id"]
-                original = float(loan_given.get(lid, loan_dict["principal"]))
+                # Canonical original = loans.principal (Stage 5); foundational LG is fallback
+                original = float(
+                    loan_dict.get("principal", loan_given.get(lid, 0)) or 0
+                )
+                if lid in loan_given and original <= 0:
+                    original = float(loan_given[lid])
                 received = float(principal_received.get(lid, 0))
                 outstanding = max(0.0, original - received)
 
                 loan_dict["original_principal"] = original
                 loan_dict["outstanding_principal"] = outstanding
+                loan_dict["due_day"] = int(loan_dict["due_day"])
                 loan_dict["display_name"] = self._generate_display_name(loan_dict)
 
                 borrower = loan_dict["borrower_name"]
                 self.loans_cache.setdefault(borrower, []).append(loan_dict)
 
-                key = (borrower, loan_dict["due_day"])
+                key = (borrower, int(loan_dict["due_day"]))
                 self.borrower_loans_cache.setdefault(key, []).append(loan_dict)
 
             conn.close()
@@ -167,6 +177,7 @@ class LoanMatcher:
         Status: 'exact_match', 'ambiguous', 'not_found'
         """
         borrower_name = borrower_name.strip()
+        due_day = int(due_day)
         key = (borrower_name, due_day)
 
         if key not in self.borrower_loans_cache:
@@ -189,6 +200,7 @@ class LoanMatcher:
         Always leave ambiguous cases for manual review (Stage 7 UI).
         """
         borrower_name = borrower_name.strip()
+        due_day = int(due_day)
         key = (borrower_name, due_day)
         candidates = self.borrower_loans_cache.get(key, [])
         if not candidates:

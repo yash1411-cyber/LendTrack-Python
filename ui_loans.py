@@ -344,12 +344,18 @@ class LoanDialog(ctk.CTkToplevel):
                                  "Due day must be a whole number between 1 and 31.\nExample: 5")
             return
 
-        start_date = self._entries["start_date"].get().strip() or str(date.today())
-        status     = self._status_var.get()
+        start_date = self._entries["start_date"].get().strip()
+        if not start_date:
+            if self._mode == "edit" and self._loan:
+                # Preserve identity — never silently replace with today on edit
+                start_date = self._loan.get("start_date") or str(date.today())
+            else:
+                start_date = str(date.today())
+        status = self._status_var.get()
 
         if self._mode == "add":
             selected_label = self._borrower_var.get()
-            borrower_id    = self._borrower_id_map.get(selected_label)
+            borrower_id = self._borrower_id_map.get(selected_label)
             if not borrower_id:
                 messagebox.showerror("Error", "Please select a valid borrower from the dropdown.")
                 return
@@ -365,8 +371,22 @@ class LoanDialog(ctk.CTkToplevel):
             )
         else:
             try:
-                db.update_loan(self._loan["loan_id"], principal, interest,
-                               due_day, start_date, status)
+                prev_status = (self._loan or {}).get("status", "Active")
+                # Pure reopen: flip Closed → Active without rewriting identity fields
+                if (
+                    prev_status == "Closed"
+                    and status == "Active"
+                    and abs(float(self._loan.get("original_principal", self._loan["principal"])) - principal) < 1e-9
+                    and float(self._loan["interest_rate"]) == float(interest)
+                    and int(self._loan["due_day"]) == int(due_day)
+                    and (self._loan.get("start_date") or "") == start_date
+                ):
+                    db.reopen_loan(self._loan["loan_id"])
+                else:
+                    db.update_loan(
+                        self._loan["loan_id"], principal, interest,
+                        due_day, start_date, status
+                    )
                 messagebox.showinfo("Updated", "Loan updated successfully!")
             except ValueError as e:
                 messagebox.showerror("Invalid Principal", str(e))
