@@ -3,9 +3,10 @@ Historical Rebuild Service - Recalculate all metrics after import
 Production-ready recalculation of outstanding principal, pending interest, etc.
 """
 
-import sqlite3
 from datetime import datetime, date as date_class
 from typing import Dict
+
+import database as db
 
 class HistoricalRebuildService:
     """Recalculate all financial metrics after importing historical transactions"""
@@ -19,7 +20,7 @@ class HistoricalRebuildService:
         Returns: {'recalculated': count, 'errors': count}
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = db.get_connection(self.db_path)
             c = conn.cursor()
             
             # Get all loans
@@ -33,7 +34,9 @@ class HistoricalRebuildService:
                     self._rebuild_loan(c, loan_row, conn)
                     recalculated += 1
                 except Exception as e:
-                    print(f"Error rebuilding loan {loan_row[1]}: {e}")
+                    # Index 1 remains loan_id for plain tuples; Row also supports it
+                    loan_id = loan_row[1] if not hasattr(loan_row, "keys") else loan_row["loan_id"]
+                    print(f"Error rebuilding loan {loan_id}: {e}")
                     errors += 1
             
             conn.commit()

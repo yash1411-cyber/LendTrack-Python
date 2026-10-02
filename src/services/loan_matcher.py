@@ -5,8 +5,9 @@ With smart 3-step matching and ambiguity detection
 """
 
 from typing import Dict, Tuple, Optional, List
-import sqlite3
 from datetime import datetime
+
+import database as db
 
 class LoanMatcher:
     """Match transactions to loans using multiple strategies"""
@@ -20,8 +21,7 @@ class LoanMatcher:
     def _load_all_loans(self):
         """Load all loans into memory for fast matching"""
         try:
-            conn = sqlite3.connect(self.db_path)
-            conn.row_factory = sqlite3.Row
+            conn = db.get_connection(self.db_path)
             c = conn.cursor()
             
             rows = c.execute("""

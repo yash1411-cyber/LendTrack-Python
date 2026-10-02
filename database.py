@@ -12,9 +12,15 @@ from typing import Optional
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lendtrack.db")
 
 
-def get_connection() -> sqlite3.Connection:
-    """Return a connection with row_factory set for dict-like access."""
-    conn = sqlite3.connect(DB_PATH)
+def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
+    """
+    Return a connection with row_factory set for dict-like access.
+
+    Uses DB_PATH by default. Callers (including import services) may pass an
+    explicit path; foreign_keys are always enabled so all access is consistent.
+    """
+    path = DB_PATH if db_path is None else db_path
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn

@@ -5,7 +5,6 @@ ui_transactions.py - Daily transaction entry, history, and Excel import
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
 from datetime import date, datetime
-import os
 from src.ui.import_dialog import ImportDialog
 import database as db
 
@@ -286,8 +285,7 @@ class TransactionsFrame(ctk.CTkFrame):
 
     def _open_import_dialog(self):
         """Open import dialog for Excel transactions"""
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lendtrack.db")
-        dialog = ImportDialog(self, db_path)
+        dialog = ImportDialog(self, db.DB_PATH)
         self.after(500, self.refresh)
 
     def _export_import_template(self):
@@ -295,8 +293,6 @@ class TransactionsFrame(ctk.CTkFrame):
         try:
             from src.services.import_template_generator import ImportTemplateGenerator
             from src.services.loan_matcher import LoanMatcher
-
-            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lendtrack.db")
 
             # Ask where to save
             file_path = filedialog.asksaveasfilename(
@@ -308,9 +304,9 @@ class TransactionsFrame(ctk.CTkFrame):
             if not file_path:
                 return
 
-            # Generate template
-            matcher = LoanMatcher(db_path)
-            generator = ImportTemplateGenerator(db_path, file_path)
+            # Always use the canonical application database path
+            matcher = LoanMatcher(db.DB_PATH)
+            generator = ImportTemplateGenerator(db.DB_PATH, file_path)
 
             if generator.generate(matcher):
                 messagebox.showinfo("Success", f"Template exported:\n{file_path}\n\nOpen it to import transactions.")

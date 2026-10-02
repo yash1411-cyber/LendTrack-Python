@@ -4,7 +4,8 @@ Production-ready duplicate detection logic
 """
 
 from typing import List, Dict, Set
-import sqlite3
+
+import database as db
 
 class DuplicateChecker:
     """Detect duplicate transactions in database"""
@@ -17,7 +18,7 @@ class DuplicateChecker:
     def _load_existing_transactions(self):
         """Load all existing transactions from database"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = db.get_connection(self.db_path)
             c = conn.cursor()
             
             rows = c.execute("""
@@ -27,9 +28,10 @@ class DuplicateChecker:
             """).fetchall()
             
             # Build unique key: (date, loan_id, type, amount)
+            # Row objects support both index and key access
             for row in rows:
-                key = (row[5], row[2], row[3], row[4])  # date, loan_id, type, amount
-                self.existing_txns[key] = row[0]  # transaction id
+                key = (row["txn_date"], row["loan_id"], row["txn_type"], row["amount"])
+                self.existing_txns[key] = row["id"]
             
             conn.close()
         except Exception as e:
