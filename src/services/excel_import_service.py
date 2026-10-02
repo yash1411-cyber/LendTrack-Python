@@ -35,6 +35,9 @@ class ExcelImportService:
         Supports both old and new format
         Returns: (transactions_list, success_bool)
         """
+        self.errors = []
+        self.warnings = []
+        self.import_format = None
         try:
             # Read the 'Daily Transactions' sheet
             df = pd.read_excel(file_path, sheet_name='Daily Transactions')

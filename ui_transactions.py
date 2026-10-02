@@ -5,7 +5,6 @@ ui_transactions.py - Daily transaction entry, history, and Excel import
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
 from datetime import date, datetime
-import os
 from src.ui.import_dialog import ImportDialog
 import database as db
 
@@ -20,7 +19,7 @@ TEXT  = "#E8EBF2"
 MUTED = "#7A849E"
 BORDER= "#2C3347"
 
-TXN_TYPES = ["Interest Received", "Principal Received", "Loan Given"]
+TXN_TYPES = ["Interest Received", "Principal Received"]
 TXN_COLORS = {"Interest Received": GREEN,
                "Principal Received": ACCENT,
                "Loan Given": AMBER}
@@ -193,8 +192,8 @@ class TransactionsFrame(ctk.CTkFrame):
         except Exception:
             return
         loans = db.get_loans_for_borrower(bid)
-        opts = [f"{l['loan_id']} (₹{l['principal']:,.0f})" for l in loans
-                if l["status"] == "Active"]
+        opts = [f"{l['loan_id']} (₹{l.get('outstanding_principal', l['principal']):,.0f} due)"
+                for l in loans if l["status"] == "Active"]
         self._loan_dd.configure(values=opts or ["—"])
         if opts:
             self._loan_var.set(opts[0])
@@ -278,16 +277,24 @@ class TransactionsFrame(ctk.CTkFrame):
         self._load_table()
 
     def _delete_txn(self, tid: int):
-        if messagebox.askyesno("Delete", "Remove this transaction?"):
+        if not messagebox.askyesno(
+            "Delete Transaction",
+            "Remove this transaction?\n\n"
+            "Outstanding balance and interest will recalculate from remaining entries.\n"
+            "Loan Given entries cannot be deleted."
+        ):
+            return
+        try:
             db.delete_transaction(tid)
             self._load_table()
+        except ValueError as e:
+            messagebox.showerror("Cannot Delete Transaction", str(e))
 
     # ── IMPORT OPERATIONS ──────────────────────────────────────────────────
 
     def _open_import_dialog(self):
         """Open import dialog for Excel transactions"""
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lendtrack.db")
-        dialog = ImportDialog(self, db_path)
+        dialog = ImportDialog(self, db.DB_PATH)
         self.after(500, self.refresh)
 
     def _export_import_template(self):
@@ -295,8 +302,6 @@ class TransactionsFrame(ctk.CTkFrame):
         try:
             from src.services.import_template_generator import ImportTemplateGenerator
             from src.services.loan_matcher import LoanMatcher
-
-            db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lendtrack.db")
 
             # Ask where to save
             file_path = filedialog.asksaveasfilename(
@@ -308,9 +313,9 @@ class TransactionsFrame(ctk.CTkFrame):
             if not file_path:
                 return
 
-            # Generate template
-            matcher = LoanMatcher(db_path)
-            generator = ImportTemplateGenerator(db_path, file_path)
+            # Always use the canonical application database path
+            matcher = LoanMatcher(db.DB_PATH)
+            generator = ImportTemplateGenerator(db.DB_PATH, file_path)
 
             if generator.generate(matcher):
                 messagebox.showinfo("Success", f"Template exported:\n{file_path}\n\nOpen it to import transactions.")

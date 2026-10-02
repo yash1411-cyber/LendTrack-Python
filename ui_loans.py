@@ -68,9 +68,9 @@ class LoansFrame(ctk.CTkFrame):
         content.grid_columnconfigure(0, weight=1)
         content.grid_rowconfigure(0, weight=1)
 
-        cols    = ["Loan ID", "Borrower", "Principal", "Rate", "Due Day",
+        cols    = ["Loan ID", "Borrower", "Original", "Outstanding", "Rate", "Due Day",
                    "Exp. Interest", "Pending", "Status", "Actions"]
-        weights = [1, 2, 2, 1, 1, 2, 2, 1, 1]
+        weights = [1, 2, 2, 2, 1, 1, 2, 2, 1, 1]
 
         tbl = ctk.CTkScrollableFrame(content, fg_color=CARD,
                                      corner_radius=14,
@@ -100,34 +100,36 @@ class LoansFrame(ctk.CTkFrame):
             lbl = ctk.CTkLabel(self._tbl, text="No loans yet. Click '+ New Loan' to add one.",
                                text_color=MUTED,
                                font=ctk.CTkFont("Segoe UI", 13))
-            lbl.grid(row=1, column=0, columnspan=9, pady=32)
+            lbl.grid(row=1, column=0, columnspan=10, pady=32)
             self._row_widgets.append(lbl)
             return
 
         for ri, l in enumerate(loans, start=1):
             bg = CARD if ri % 2 == 0 else CARD2
             rf = ctk.CTkFrame(self._tbl, fg_color=bg, corner_radius=0)
-            rf.grid(row=ri, column=0, columnspan=9, sticky="ew")
-            for ci in range(9):
-                rf.grid_columnconfigure(ci, weight=[1,2,2,1,1,2,2,1,1][ci])
+            rf.grid(row=ri, column=0, columnspan=10, sticky="ew")
+            for ci in range(10):
+                rf.grid_columnconfigure(ci, weight=[1,2,2,2,1,1,2,2,1,1][ci])
             self._row_widgets.append(rf)
 
             exp     = db.expected_monthly_interest(l)
             pending = db.compute_pending_interest(l) if l["status"] == "Active" else 0
             status_color  = GREEN if l["status"] == "Active" else MUTED
             pending_color = RED if pending > 0 else TEXT
+            original = l.get("original_principal", l["principal"])
+            outstanding = l.get("outstanding_principal", l["principal"])
 
-            vals   = [l["loan_id"], l["borrower_name"], _fmt(l["principal"]),
+            vals   = [l["loan_id"], l["borrower_name"], _fmt(original), _fmt(outstanding),
                       f"{l['interest_rate']}%", str(l["due_day"]),
                       _fmt(exp), _fmt(pending), l["status"]]
-            colors = [TEXT, TEXT, TEXT, TEXT, TEXT, GREEN, pending_color, status_color]
+            colors = [TEXT, TEXT, TEXT, ACCENT, TEXT, TEXT, GREEN, pending_color, status_color]
             for ci, (v, col) in enumerate(zip(vals, colors)):
                 ctk.CTkLabel(rf, text=v,
                              font=ctk.CTkFont("Segoe UI", 12),
                              text_color=col).grid(row=0, column=ci,
                                                   padx=10, pady=8, sticky="w")
             af = ctk.CTkFrame(rf, fg_color="transparent")
-            af.grid(row=0, column=8, padx=6, pady=4)
+            af.grid(row=0, column=9, padx=6, pady=4)
             ctk.CTkButton(af, text="Edit", width=52, height=26,
                           fg_color=ACCENT, hover_color="#3A72D8",
                           font=ctk.CTkFont("Segoe UI", 11),
@@ -158,13 +160,33 @@ class LoansFrame(ctk.CTkFrame):
    
 
     def _delete(self, lid):
-        if messagebox.askyesno("Delete Loan", f"Delete loan {lid}? This cannot be undone."):
-            try:
-                db.delete_loan(lid)
-                messagebox.showinfo("Success", f"Loan {lid} deleted successfully")
-                self._load_table()
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not delete loan:\n{str(e)}")
+        loan = db.get_loan(lid)
+        if not loan:
+            return
+        if not messagebox.askyesno(
+            "Delete Loan",
+            f"Delete loan {lid}?\n\n"
+            "Loans with transaction history cannot be deleted.\n"
+            "You will be offered the option to Close the loan instead."
+        ):
+            return
+        try:
+            db.delete_loan(lid)
+            messagebox.showinfo("Success", f"Loan {lid} deleted successfully")
+            self._load_table()
+        except ValueError as e:
+            if messagebox.askyesno(
+                "Cannot Delete — Close Instead?",
+                f"{e}\n\nClose loan {lid} now? (history is preserved)"
+            ):
+                try:
+                    db.close_loan(lid)
+                    messagebox.showinfo("Closed", f"Loan {lid} marked Closed.")
+                    self._load_table()
+                except Exception as close_err:
+                    messagebox.showerror("Error", f"Could not close loan:\n{close_err}")
+            else:
+                messagebox.showinfo("Cancelled", "Loan was not deleted or closed.")
 # ── Loan Dialog ───────────────────────────────────────────────────────────────
 
 class LoanDialog(ctk.CTkToplevel):
@@ -228,7 +250,7 @@ class LoanDialog(ctk.CTkToplevel):
 
         # ── Input fields ──────────────────────────────────────────────────
         fields = [
-            ("Principal Amount *", "principal", "e.g. 100000"),
+            ("Original Principal *", "principal", "e.g. 100000"),
             ("Interest Rate % *",  "interest",  "e.g. 3.0"),
             ("Due Day (1-31) *",   "due_day",   "e.g. 5"),
             ("Start Date",         "start_date", str(date.today())),
@@ -265,7 +287,7 @@ class LoanDialog(ctk.CTkToplevel):
 
         # Pre-fill when editing
         if self._mode == "edit" and self._loan:
-            self._entries["principal"].insert(0, str(self._loan["principal"]))
+            self._entries["principal"].insert(0, str(self._loan.get("original_principal", self._loan["principal"])))
             self._entries["interest"].insert(0,  str(self._loan["interest_rate"]))
             self._entries["due_day"].insert(0,   str(self._loan["due_day"]))
             self._entries["start_date"].insert(0, self._loan.get("start_date", "") or "")
@@ -322,12 +344,18 @@ class LoanDialog(ctk.CTkToplevel):
                                  "Due day must be a whole number between 1 and 31.\nExample: 5")
             return
 
-        start_date = self._entries["start_date"].get().strip() or str(date.today())
-        status     = self._status_var.get()
+        start_date = self._entries["start_date"].get().strip()
+        if not start_date:
+            if self._mode == "edit" and self._loan:
+                # Preserve identity — never silently replace with today on edit
+                start_date = self._loan.get("start_date") or str(date.today())
+            else:
+                start_date = str(date.today())
+        status = self._status_var.get()
 
         if self._mode == "add":
             selected_label = self._borrower_var.get()
-            borrower_id    = self._borrower_id_map.get(selected_label)
+            borrower_id = self._borrower_id_map.get(selected_label)
             if not borrower_id:
                 messagebox.showerror("Error", "Please select a valid borrower from the dropdown.")
                 return
@@ -342,9 +370,27 @@ class LoanDialog(ctk.CTkToplevel):
                 f"Monthly Int : Rs.{principal*interest/100:,.0f}"
             )
         else:
-            db.update_loan(self._loan["loan_id"], principal, interest,
-                           due_day, start_date, status)
-            messagebox.showinfo("Updated", "Loan updated successfully!")
+            try:
+                prev_status = (self._loan or {}).get("status", "Active")
+                # Pure reopen: flip Closed → Active without rewriting identity fields
+                if (
+                    prev_status == "Closed"
+                    and status == "Active"
+                    and abs(float(self._loan.get("original_principal", self._loan["principal"])) - principal) < 1e-9
+                    and float(self._loan["interest_rate"]) == float(interest)
+                    and int(self._loan["due_day"]) == int(due_day)
+                    and (self._loan.get("start_date") or "") == start_date
+                ):
+                    db.reopen_loan(self._loan["loan_id"])
+                else:
+                    db.update_loan(
+                        self._loan["loan_id"], principal, interest,
+                        due_day, start_date, status
+                    )
+                messagebox.showinfo("Updated", "Loan updated successfully!")
+            except ValueError as e:
+                messagebox.showerror("Invalid Principal", str(e))
+                return
 
         if self._on_save:
             self._on_save()
