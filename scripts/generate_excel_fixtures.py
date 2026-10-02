@@ -124,8 +124,9 @@ def generate_all() -> None:
         ],
     )
 
-    # Bonus: old display-name format (pre-repayment style principal in name)
-    # Anita's original principal was 50000 before partial repayment mutated it.
+    # Bonus: old display-name format.
+    # Anita start_date is 2024-03-01; original principal 50000 remains in display_name
+    # even after partial repayment reduced outstanding to 40000.
     _write(
         os.path.join(FIXTURE_DIR, "09_old_display_name.xlsx"),
         OLD_HEADERS,
@@ -133,7 +134,7 @@ def generate_all() -> None:
             [
                 "15/03/2024",
                 "Anita Desai",
-                "05-Feb-24 | ₹50,000 | Due 10",
+                "01-Mar-24 | ₹50,000 | Due 10",
                 "Interest Received",
                 1250,
                 "Cash",
@@ -142,11 +143,11 @@ def generate_all() -> None:
             [
                 "15/05/2024",
                 "Anita Desai",
-                "05-Feb-24 | ₹40,000 | Due 10",
+                "01-Mar-24 | ₹40,000 | Due 10",
                 "Interest Received",
                 1000,
                 "Cash",
-                "display name after principal repayment (mutated)",
+                "display name using outstanding (must not silently match)",
             ],
         ],
     )
