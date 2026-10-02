@@ -160,13 +160,33 @@ class LoansFrame(ctk.CTkFrame):
    
 
     def _delete(self, lid):
-        if messagebox.askyesno("Delete Loan", f"Delete loan {lid}? This cannot be undone."):
-            try:
-                db.delete_loan(lid)
-                messagebox.showinfo("Success", f"Loan {lid} deleted successfully")
-                self._load_table()
-            except Exception as e:
-                messagebox.showerror("Error", f"Could not delete loan:\n{str(e)}")
+        loan = db.get_loan(lid)
+        if not loan:
+            return
+        if not messagebox.askyesno(
+            "Delete Loan",
+            f"Delete loan {lid}?\n\n"
+            "Loans with transaction history cannot be deleted.\n"
+            "You will be offered the option to Close the loan instead."
+        ):
+            return
+        try:
+            db.delete_loan(lid)
+            messagebox.showinfo("Success", f"Loan {lid} deleted successfully")
+            self._load_table()
+        except ValueError as e:
+            if messagebox.askyesno(
+                "Cannot Delete — Close Instead?",
+                f"{e}\n\nClose loan {lid} now? (history is preserved)"
+            ):
+                try:
+                    db.close_loan(lid)
+                    messagebox.showinfo("Closed", f"Loan {lid} marked Closed.")
+                    self._load_table()
+                except Exception as close_err:
+                    messagebox.showerror("Error", f"Could not close loan:\n{close_err}")
+            else:
+                messagebox.showinfo("Cancelled", "Loan was not deleted or closed.")
 # ── Loan Dialog ───────────────────────────────────────────────────────────────
 
 class LoanDialog(ctk.CTkToplevel):

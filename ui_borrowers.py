@@ -140,11 +140,17 @@ class BorrowersFrame(ctk.CTkFrame):
         b = db.get_borrower(bid)
         if not b:
             return
-        if messagebox.askyesno("Delete Borrower",
-                               f"Delete borrower '{b['name']}' ({bid})?\n"
-                               "All their loans/transactions remain."):
+        if not messagebox.askyesno(
+            "Delete Borrower",
+            f"Delete borrower '{b['name']}' ({bid})?\n\n"
+            "This is only allowed if the borrower has no loans and no transactions."
+        ):
+            return
+        try:
             db.delete_borrower(bid)
             self._load_table()
+        except ValueError as e:
+            messagebox.showerror("Cannot Delete Borrower", str(e))
 
 
 # ── Add / Edit Dialog ─────────────────────────────────────────────────────────

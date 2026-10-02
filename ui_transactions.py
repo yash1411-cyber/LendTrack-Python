@@ -277,9 +277,18 @@ class TransactionsFrame(ctk.CTkFrame):
         self._load_table()
 
     def _delete_txn(self, tid: int):
-        if messagebox.askyesno("Delete", "Remove this transaction?"):
+        if not messagebox.askyesno(
+            "Delete Transaction",
+            "Remove this transaction?\n\n"
+            "Outstanding balance and interest will recalculate from remaining entries.\n"
+            "Loan Given entries cannot be deleted."
+        ):
+            return
+        try:
             db.delete_transaction(tid)
             self._load_table()
+        except ValueError as e:
+            messagebox.showerror("Cannot Delete Transaction", str(e))
 
     # ── IMPORT OPERATIONS ──────────────────────────────────────────────────
 

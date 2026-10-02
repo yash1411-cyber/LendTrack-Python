@@ -137,10 +137,31 @@ def update_borrower(borrower_id: str, name: str, phone: str, notes: str):
 
 
 def delete_borrower(borrower_id: str):
+    """
+    Delete a borrower only when they have no loans and no transactions.
+    Preserves financial history — does not cascade.
+    """
     conn = get_connection()
-    conn.execute("DELETE FROM borrowers WHERE borrower_id=?", (borrower_id,))
-    conn.commit()
-    conn.close()
+    try:
+        loan_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM loans WHERE borrower_id=?", (borrower_id,)
+        ).fetchone()["c"]
+        txn_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM transactions WHERE borrower_id=?", (borrower_id,)
+        ).fetchone()["c"]
+        if loan_count or txn_count:
+            raise ValueError(
+                f"Cannot delete borrower {borrower_id}: "
+                f"{loan_count} loan(s) and {txn_count} transaction(s) still exist. "
+                "Close related loans and keep history, or remove child records first."
+            )
+        conn.execute("DELETE FROM borrowers WHERE borrower_id=?", (borrower_id,))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def get_all_borrowers(search: str = "") -> list:
@@ -226,22 +247,43 @@ def update_loan(loan_id: str, principal: float, interest_rate: float,
 
 
 def delete_loan(loan_id: str):
+    """
+    Delete a loan only when it has no transactions.
+    Loans with history must be Closed instead so imported/manual history is kept.
+    """
     conn = get_connection()
     try:
-        # First, delete all transactions for this loan
-        conn.execute("DELETE FROM transactions WHERE loan_id=?", (loan_id,))
-        
-        # Then delete the loan itself
+        txn_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM transactions WHERE loan_id=?", (loan_id,)
+        ).fetchone()["c"]
+        if txn_count:
+            raise ValueError(
+                f"Cannot delete loan {loan_id}: {txn_count} transaction(s) exist. "
+                "Close the loan instead to preserve history."
+            )
+        conn.execute("DELETE FROM interest_ledger WHERE loan_id=?", (loan_id,))
         conn.execute("DELETE FROM loans WHERE loan_id=?", (loan_id,))
-        
         conn.commit()
-        print(f"Loan {loan_id} deleted successfully")
-    except Exception as e:
+    except Exception:
         conn.rollback()
-        print(f"Error deleting loan: {e}")
         raise
     finally:
         conn.close()
+
+
+def close_loan(loan_id: str):
+    """Mark a loan Closed without deleting transactions."""
+    loan = get_loan(loan_id)
+    if not loan:
+        raise ValueError(f"Loan {loan_id} not found")
+    update_loan(
+        loan_id,
+        loan.get("original_principal", loan["principal"]),
+        loan["interest_rate"],
+        loan["due_day"],
+        loan.get("start_date") or "",
+        "Closed",
+    )
 
 
 def get_loans_for_borrower(borrower_id: str) -> list:
@@ -520,16 +562,40 @@ def get_transactions_for_borrower(borrower_id: str) -> list:
     return [dict(r) for r in rows]
 
 
-def delete_transaction(txn_id: int):
+def delete_transaction(txn_id: int) -> dict:
     """
-    Delete a transaction.
-    Outstanding/interest are derived from remaining transactions (Stage 5),
-    so no loans.principal mutation is reversed here.
+    Delete a non-foundational transaction.
+
+    - Loan Given cannot be deleted while the loan exists (preserves original principal).
+    - Interest / Principal Received may be deleted; outstanding and interest
+      recalculate from remaining transactions (Stage 5 model).
+
+    Returns the deleted transaction dict.
     """
     conn = get_connection()
-    conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
-    conn.commit()
-    conn.close()
+    try:
+        row = conn.execute(
+            "SELECT * FROM transactions WHERE id=?", (txn_id,)
+        ).fetchone()
+        if not row:
+            raise ValueError(f"Transaction {txn_id} not found")
+        txn = dict(row)
+
+        if txn["txn_type"] == "Loan Given":
+            raise ValueError(
+                "Cannot delete Loan Given transactions. "
+                "They define the loan's original principal. "
+                "Close the loan to retain history instead."
+            )
+
+        conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
+        conn.commit()
+        return txn
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ──────────────────────────────────────────────
