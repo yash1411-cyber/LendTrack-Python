@@ -15,10 +15,12 @@ from services.excel_import_service import ExcelImportService
 from services.loan_matcher import LoanMatcher
 from services.duplicate_checker import DuplicateChecker
 from services.historical_rebuild_service import HistoricalRebuildService
-from services.import_classify import (
+from src.services.import_classify import (
     classify_import_rows,
     build_import_status,
     apply_review_resolution,
+    review_dialog_was_cancelled,
+    POSSIBLE_NAME_MATCH_REASON,
 )
 from src.ui.ambiguous_match_dialog import AmbiguousMatchDialog
 import database as db
@@ -471,12 +473,13 @@ Total Records:           {len(self.transactions)}
                 txn_data=txn,
                 due_day=due_day,
                 reason=item.get("reason", ""),
+                possible_name_match=item.get("reason") == POSSIBLE_NAME_MATCH_REASON,
             )
             self.wait_window(dialog)
             selected, skipped = dialog.get_result()
 
             # Window closed via WM without Select/Skip → treat as cancel import
-            if not skipped and selected is None:
+            if review_dialog_was_cancelled(selected, skipped):
                 # Put unresolved items back so user can retry
                 self.review_txns = pending
                 self.skipped_review_txns = []

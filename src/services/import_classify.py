@@ -12,6 +12,13 @@ from typing import Dict, List, Any, Optional
 from src.services.duplicate_checker import DuplicateChecker
 from src.services.loan_matcher import LoanMatcher
 
+POSSIBLE_NAME_MATCH_REASON = "Possible match — please confirm"
+
+
+def review_dialog_was_cancelled(selected_loan, skipped: bool) -> bool:
+    """Stage 7/9: closing the dialog without Select or Skip cancels the import."""
+    return (not skipped) and selected_loan is None
+
 
 def classify_import_rows(
     transactions: List[Dict],
@@ -47,11 +54,17 @@ def classify_import_rows(
                 elif isinstance(status, str) and status.startswith("Ambiguous"):
                     needs_review = True
                     review_candidates = list(
-                        loan_matcher.loans_cache.get(txn["borrower_name"], [])
+                        loan_matcher.loans_for_canonical_borrower(txn["borrower_name"])
                     )
                     review_reason = status
                 else:
-                    error_msg = status
+                    similar = _assisted_name_candidates(loan_matcher, txn["borrower_name"], status)
+                    if similar:
+                        needs_review = True
+                        review_candidates = similar
+                        review_reason = POSSIBLE_NAME_MATCH_REASON
+                    else:
+                        error_msg = status
 
             elif "due_day" in txn:
                 loan, candidates, step1_status = loan_matcher.match_by_borrower_due_day(
@@ -71,7 +84,15 @@ def classify_import_rows(
                     review_candidates = candidates
                     review_reason = "Multiple loans share borrower + due day"
                 else:
-                    error_msg = step1_status
+                    similar = _assisted_name_candidates(
+                        loan_matcher, txn["borrower_name"], step1_status
+                    )
+                    if similar:
+                        needs_review = True
+                        review_candidates = similar
+                        review_reason = POSSIBLE_NAME_MATCH_REASON
+                    else:
+                        error_msg = step1_status
             else:
                 error_msg = "Row missing Loan Display Name and Due Day"
 
@@ -117,6 +138,23 @@ def classify_import_rows(
         "duplicate_txns": duplicate_txns,
         "error_txns": error_txns,
     }
+
+
+def _assisted_name_candidates(
+    loan_matcher: LoanMatcher,
+    borrower_name: str,
+    not_found_status: str,  # retained for call-site clarity; lookup uses matcher cache
+) -> List[Dict]:
+    """
+    After deterministic matching fails, offer similar-name loans for confirmation.
+
+    If the Excel borrower is already a known name (exact/normalized) but the
+    loan/due-day did not match, do NOT widen to other borrowers.
+    """
+    kind, _names = loan_matcher.canonical_borrower_names(borrower_name)
+    if kind != "not_found":
+        return []
+    return loan_matcher.find_similar_name_loans(borrower_name)
 
 
 def apply_review_resolution(

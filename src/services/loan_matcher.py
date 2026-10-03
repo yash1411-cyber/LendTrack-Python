@@ -13,6 +13,10 @@ from typing import Dict, Tuple, Optional, List
 from datetime import datetime
 
 import database as db
+from src.services.name_similarity import (
+    names_are_similar,
+    names_equal_normalized,
+)
 
 
 class LoanMatcher:
@@ -107,6 +111,64 @@ class LoanMatcher:
     # OLD FORMAT MATCHING (Loan Display Name)
     # ══════════════════════════════════════════════════════════════
 
+    def canonical_borrower_names(self, borrower_name: str) -> Tuple[str, List[str]]:
+        """
+        Deterministic borrower identity only (exact or normalized-equal).
+
+        Returns (kind, names):
+          'exact' | 'normalized_exact' | 'normalized_ambiguous' | 'not_found'
+        Does not include similar-name guesses.
+        """
+        stripped = (borrower_name or "").strip()
+        if stripped in self.loans_cache:
+            return "exact", [stripped]
+
+        hits = [
+            name for name in self.loans_cache
+            if names_equal_normalized(stripped, name)
+        ]
+        if len(hits) == 1:
+            return "normalized_exact", hits
+        if len(hits) > 1:
+            return "normalized_ambiguous", hits
+        return "not_found", []
+
+    def loans_for_canonical_borrower(self, borrower_name: str) -> List[Dict]:
+        kind, names = self.canonical_borrower_names(borrower_name)
+        if kind in ("exact", "normalized_exact"):
+            return list(self.loans_cache.get(names[0], []))
+        if kind == "normalized_ambiguous":
+            loans: List[Dict] = []
+            for name in names:
+                loans.extend(self.loans_cache.get(name, []))
+            return loans
+        return []
+
+    def find_similar_name_loans(self, borrower_name: str) -> List[Dict]:
+        """
+        Stage 9: loans whose borrower name is similar to Excel's name.
+
+        Never auto-assigns. Each loan is a separate candidate.
+        Closed loans are included (same as Stage 3 historical matching).
+        """
+        kind, _names = self.canonical_borrower_names(borrower_name)
+        if kind in ("exact", "normalized_exact"):
+            return []
+
+        seen = set()
+        candidates: List[Dict] = []
+        for stored_name, loans in self.loans_cache.items():
+            if not names_are_similar(borrower_name, stored_name):
+                continue
+            for loan in loans:
+                lid = loan.get("loan_id")
+                if lid in seen:
+                    continue
+                seen.add(lid)
+                candidates.append(loan)
+        candidates.sort(key=lambda l: (l.get("borrower_name") or "", l.get("loan_id") or ""))
+        return candidates
+
     def match_by_display_name(self, borrower_name: str, loan_display: str) -> Tuple[Optional[Dict], str]:
         """
         Match using Loan Display Name.
@@ -115,10 +177,13 @@ class LoanMatcher:
         borrower_name = borrower_name.strip()
         loan_display = loan_display.strip()
 
-        if borrower_name not in self.loans_cache:
+        kind, names = self.canonical_borrower_names(borrower_name)
+        if kind == "not_found":
             return None, f"Borrower '{borrower_name}' not found"
+        if kind == "normalized_ambiguous":
+            return None, f"Ambiguous: {len(names)} borrowers match"
 
-        loans = self.loans_cache[borrower_name]
+        loans = list(self.loans_cache.get(names[0], []))
 
         exact = [l for l in loans if l["display_name"].lower() == loan_display.lower()]
         if len(exact) == 1:
@@ -178,12 +243,24 @@ class LoanMatcher:
         """
         borrower_name = borrower_name.strip()
         due_day = int(due_day)
-        key = (borrower_name, due_day)
 
-        if key not in self.borrower_loans_cache:
+        kind, names = self.canonical_borrower_names(borrower_name)
+        if kind == "not_found":
             return None, [], f"No loan found for {borrower_name} (Due Day {due_day})"
 
-        candidates = self.borrower_loans_cache[key]
+        if kind == "normalized_ambiguous":
+            loans: List[Dict] = []
+            for name in names:
+                loans.extend(self.loans_cache.get(name, []))
+            due_matches = [l for l in loans if int(l["due_day"]) == due_day]
+            if not due_matches:
+                return None, [], f"No loan found for {borrower_name} (Due Day {due_day})"
+            return None, due_matches, "ambiguous"
+
+        key = (names[0], due_day)
+        candidates = list(self.borrower_loans_cache.get(key, []))
+        if not candidates:
+            return None, [], f"No loan found for {borrower_name} (Due Day {due_day})"
 
         if len(candidates) == 1:
             return candidates[0], candidates, "exact_match"
@@ -201,8 +278,16 @@ class LoanMatcher:
         """
         borrower_name = borrower_name.strip()
         due_day = int(due_day)
-        key = (borrower_name, due_day)
-        candidates = self.borrower_loans_cache.get(key, [])
+        kind, names = self.canonical_borrower_names(borrower_name)
+        if kind in ("exact", "normalized_exact"):
+            key = (names[0], due_day)
+            candidates = list(self.borrower_loans_cache.get(key, []))
+        elif kind == "normalized_ambiguous":
+            candidates = []
+            for name in names:
+                candidates.extend(self.borrower_loans_cache.get((name, due_day), []))
+        else:
+            candidates = []
         if not candidates:
             return None, "No candidates"
         # Intentionally never return 'matched_by_interest'
@@ -218,8 +303,12 @@ class LoanMatcher:
             expected = (outstanding * float(c["interest_rate"])) / 100
             info.append({
                 "loan_id": c["loan_id"],
+                "borrower_id": c.get("borrower_id", ""),
+                "borrower_name": c.get("borrower_name", ""),
                 "start_date": c["start_date"],
+                "due_day": c.get("due_day"),
                 "principal": original,
+                "original_principal": original,
                 "interest_rate": c["interest_rate"],
                 "expected_interest": expected,
                 "outstanding_principal": outstanding,

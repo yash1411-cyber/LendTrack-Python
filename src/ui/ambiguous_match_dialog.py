@@ -33,9 +33,16 @@ class AmbiguousMatchDialog(ctk.CTkToplevel):
         txn_data: dict,
         due_day: Optional[int] = None,
         reason: str = "",
+        possible_name_match: bool = False,
     ):
         super().__init__(parent)
-        self.title("Multiple Loans Found - Select One")
+        self.possible_name_match = possible_name_match or (
+            "Possible match" in (reason or "")
+        )
+        if self.possible_name_match:
+            self.title("Possible Match Found — Confirm")
+        else:
+            self.title("Multiple Loans Found - Select One")
         self.geometry("720x520")
         self.resizable(False, False)
         self.configure(fg_color=BG)
@@ -57,7 +64,9 @@ class AmbiguousMatchDialog(ctk.CTkToplevel):
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(3, weight=1)
 
-        if self.due_day is not None:
+        if self.possible_name_match:
+            title = "Possible match — please confirm"
+        elif self.due_day is not None:
             title = f"Multiple loans for {self.borrower_name} (Due Day {self.due_day})"
         else:
             title = f"Multiple loans for {self.borrower_name}"
@@ -67,11 +76,17 @@ class AmbiguousMatchDialog(ctk.CTkToplevel):
             text=title,
             font=ctk.CTkFont("Segoe UI", 14, "bold"),
             text_color=TEXT,
-        ).grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 8))
+        ).grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 4))
 
+        subtitle = self.reason
+        if self.possible_name_match:
+            subtitle = (
+                f"Excel name: {self.borrower_name}  •  "
+                "We couldn't find an exact match. Possible existing loans:"
+            )
         ctk.CTkLabel(
             self,
-            text=self.reason,
+            text=subtitle,
             font=ctk.CTkFont("Segoe UI", 11),
             text_color=AMBER,
         ).grid(row=1, column=0, sticky="w", padx=20, pady=(0, 8))
@@ -159,9 +174,15 @@ class AmbiguousMatchDialog(ctk.CTkToplevel):
 
         status = candidate.get("status", "")
         status_bit = f" | {status}" if status else ""
+        due = candidate.get("due_day")
+        due_bit = f" | Due {due}" if due not in (None, "") else ""
+        name = candidate.get("borrower_name") or ""
+        header = f"{candidate.get('loan_id', '?')}"
+        if name:
+            header = f"{name}  •  {header}"
         ctk.CTkLabel(
             info_frame,
-            text=f"{candidate.get('loan_id', '?')} | Start: {candidate.get('start_date', '')}{status_bit}",
+            text=f"{header} | Start: {candidate.get('start_date', '')}{due_bit}{status_bit}",
             font=ctk.CTkFont("Segoe UI", 11, "bold"),
             text_color=TEXT,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
