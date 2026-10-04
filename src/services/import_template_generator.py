@@ -121,9 +121,9 @@ class ImportTemplateGenerator:
             ws.add_data_validation(date_dv)
             date_dv.add("A2:A100")
 
-            # Transaction Type dropdown
-            txn_types = DataValidation(type="list", formula1='"Interest Received,Principal Received,Loan Given,Adjustment"')
-            txn_types.error = 'Must be one of: Interest Received, Principal Received, Loan Given, Adjustment'
+            # Transaction Type dropdown — import-supported payment types only
+            txn_types = DataValidation(type="list", formula1='"Interest Received,Principal Received"')
+            txn_types.error = 'Must be one of: Interest Received, Principal Received'
             txn_types.errorTitle = 'Invalid Transaction Type'
             ws.add_data_validation(txn_types)
             txn_types.add(f'D2:D100')

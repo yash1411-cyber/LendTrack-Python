@@ -146,10 +146,10 @@ From **Transactions**:
 - **Export Template** writes an Excel workbook (`Daily Transactions` sheet).
 - **Import Excel** reads that sheet. Nothing is saved until you confirm **Import Now**.
 
-Supported payment types in the UI: **Interest Received**, **Principal Received**.
-The template dropdown may still list additional type names; the import engine
-does not silently create borrowers or loans, and unsupported types fail rather
-than invent data. (Template type-list cleanup is a later stage.)
+Supported payment types in the UI and in newly generated templates:
+**Interest Received**, **Principal Received**. Older workbooks may still
+contain other type names; the import engine does not silently create
+borrowers or loans, and unsupported types fail rather than invent data.
 
 Dates: existing text formats such as `YYYY-MM-DD` still import. New templates
 use real Excel date cells formatted as `YYYY-MM-DD`.
