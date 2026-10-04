@@ -7,7 +7,10 @@ WARNING:
   It NEVER uses or copies production financial data.
 
 Usage (from repo root, with .venv active):
-  python scripts/seed_dev_db.py
+    python scripts/seed_dev_db.py
+
+  The script prints the resolved database path and requires typing YES
+  (exact, case-sensitive) before it deletes or writes anything.
 """
 
 from __future__ import annotations
@@ -47,6 +50,31 @@ def _banner(msg: str) -> None:
     print("=" * 72)
     print(msg)
     print("=" * 72)
+
+
+REQUIRED_CONFIRMATION = "YES"
+
+
+def confirm_destructive_seed(db_path: str, input_fn=input) -> bool:
+    """
+    Require an exact YES before any destructive seed work.
+
+    Returns True only when the operator types YES (case-sensitive).
+    Blank input, EOF, and any other value abort with no DB changes.
+    """
+    print()
+    print("WARNING: This will DELETE and recreate the development database:")
+    print(db_path)
+    print()
+    print("This operation is destructive.")
+    print("It is for synthetic development data only.")
+    print("Do NOT use it against a production database.")
+    print()
+    try:
+        answer = input_fn("Type YES to continue: ")
+    except EOFError:
+        return False
+    return answer == REQUIRED_CONFIRMATION
 
 
 def reset_database() -> str:
@@ -190,12 +218,15 @@ def seed_all() -> dict:
     }
 
 
-def run_seed() -> dict:
+def run_seed(input_fn=input) -> dict | None:
     _banner("LendTrack Stage 0 — SYNTHETIC DEVELOPMENT DATA ONLY")
     print("This is NOT production data.")
     print("This script will DESTROY and recreate the database at DB_PATH.")
     print(f"DB_PATH = {db.DB_PATH}")
     print()
+    if not confirm_destructive_seed(db.DB_PATH, input_fn=input_fn):
+        print("Seed cancelled. No changes made.")
+        return None
     reset_database()
     summary = seed_all()
     print()
@@ -211,4 +242,6 @@ def run_seed() -> dict:
 
 
 if __name__ == "__main__":
-    run_seed()
+    summary = run_seed()
+    if summary is None:
+        sys.exit(1)

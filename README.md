@@ -198,11 +198,12 @@ Do not point a build at a production lending database.
 `scripts/seed_dev_db.py` is **development-only** and **destructive**.
 
 It deletes the SQLite file at `database.DB_PATH` and writes synthetic data.
-It currently does **not** ask for confirmation. **Do not run it** against a
-database that contains real lending records.
+It prints the resolved database path and requires typing **`YES`**
+(exact, case-sensitive) before it changes anything. Any other input,
+including blank, cancels with no deletion or write.
 
-Safer confirmation for that script is planned for a later stage. Until then,
-treat it as unsafe around production data.
+**Do not run it** against a production database or any `lendtrack.db`
+that contains real lending records.
 
 ---
 
