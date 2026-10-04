@@ -32,3 +32,8 @@ dist/
 
 # Logs
 *.log
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
