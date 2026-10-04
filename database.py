@@ -81,9 +81,13 @@ def initialize_db():
     """)
 
     conn.commit()
+    from src.services.interest_ledger_service import ensure_interest_schema, reconcile_all_loans
+    ensure_interest_schema(conn)
+    conn.commit()
     conn.close()
     # Ensure loans.principal reflects original (Loan Given), not a legacy mutated balance
     repair_loan_principals()
+    reconcile_all_loans()
 
 
 # ──────────────────────────────────────────────
@@ -244,6 +248,8 @@ def update_loan(loan_id: str, principal: float, interest_rate: float,
             principal=principal,
             start_date=start_date or "",
         )
+        from src.services.interest_ledger_service import sync_loan_interest
+        sync_loan_interest(loan_id, conn=conn)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -363,6 +369,7 @@ def delete_loan(loan_id: str):
                 f"Cannot delete loan {loan_id}: {txn_count} transaction(s) exist. "
                 "Close the loan instead to preserve history."
             )
+        conn.execute("DELETE FROM interest_allocations WHERE ledger_id IN (SELECT id FROM interest_ledger WHERE loan_id=?)", (loan_id,))
         conn.execute("DELETE FROM interest_ledger WHERE loan_id=?", (loan_id,))
         conn.execute("DELETE FROM loans WHERE loan_id=?", (loan_id,))
         conn.commit()
@@ -596,11 +603,12 @@ def _apply_transaction(conn: sqlite3.Connection, borrower_id: str, loan_id: str,
             )
 
     composed = _compose_notes(notes, payment_mode)
-    conn.execute(
+    cur = conn.execute(
         """INSERT INTO transactions (borrower_id, loan_id, txn_type, amount, txn_date, notes)
            VALUES (?,?,?,?,?,?)""",
         (borrower_id, loan_id, txn_type, amount, txn_date, composed)
     )
+    return cur.lastrowid
 
 
 def add_transaction(borrower_id: str, loan_id: str, txn_type: str,
@@ -617,6 +625,9 @@ def add_transaction(borrower_id: str, loan_id: str, txn_type: str,
         _apply_transaction(
             conn, borrower_id, loan_id, txn_type, amount, txn_date, notes, payment_mode
         )
+        if loan_id:
+            from src.services.interest_ledger_service import sync_loan_interest
+            sync_loan_interest(loan_id, conn=conn)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -652,6 +663,10 @@ def add_transactions_batch(transactions: list) -> int:
                 notes=item.get("notes", ""),
                 payment_mode=item.get("payment_mode"),
             )
+        loan_ids = {item.get("loan_id") for item in transactions if item.get("loan_id")}
+        from src.services.interest_ledger_service import sync_loan_interest
+        for lid in loan_ids:
+            sync_loan_interest(lid, conn=conn)
         conn.commit()
         return len(transactions)
     except Exception:
@@ -710,6 +725,10 @@ def delete_transaction(txn_id: int) -> dict:
                 "Close the loan to retain history instead."
             )
 
+        if txn["txn_type"] == "Interest Received":
+            from src.services.interest_ledger_service import reverse_interest_allocations
+            reverse_interest_allocations(conn, txn_id)
+
         conn.execute("DELETE FROM transactions WHERE id=?", (txn_id,))
         conn.commit()
         return txn
@@ -757,29 +776,28 @@ def get_interest_received_for_loan(loan_id: str,
     return row["total"]
 
 
-def compute_pending_interest(loan: dict) -> float:
+def compute_pending_interest(loan: dict, as_of=None) -> float:
     """
-    Pending interest = accumulated expected interest - total interest received.
-    Expected uses current outstanding × rate × months since start (due-day gated).
-    Does NOT compound.
+    Pending interest = sum of unpaid completed historical cycles.
+    Not an estimate from current outstanding × elapsed months.
     """
-    start_str = loan.get("start_date") or loan.get("created_at", str(date.today()))
+    from src.services.interest_ledger_service import (
+        pending_interest_total,
+        sync_loan_interest,
+    )
+
+    lid = loan["loan_id"]
+    conn = get_connection()
     try:
-        start = date.fromisoformat(start_str[:10])
+        sync_loan_interest(lid, as_of=as_of, conn=conn)
+        total = pending_interest_total(lid, conn=conn)
+        conn.commit()
+        return total
     except Exception:
-        start = date.today()
-
-    today = date.today()
-    # Count full months elapsed since start
-    months_elapsed = (today.year - start.year) * 12 + (today.month - start.month)
-    if today.day < loan.get("due_day", 1):
-        months_elapsed -= 1
-    months_elapsed = max(0, months_elapsed)
-
-    total_expected = round(expected_monthly_interest(loan) * months_elapsed, 2)
-    total_received = get_interest_received_for_loan(loan["loan_id"])
-    pending = round(max(0.0, total_expected - total_received), 2)
-    return pending
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ──────────────────────────────────────────────
@@ -868,7 +886,7 @@ def get_report_data() -> list:
             get_interest_received_for_loan(l["loan_id"]) for l in loans
         )
         pending_interest = sum(
-            compute_pending_interest(l) for l in loans if l["status"] == "Active"
+            compute_pending_interest(l) for l in loans
         )
         report.append({
             "borrower_id": b["borrower_id"],

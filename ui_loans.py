@@ -151,7 +151,7 @@ class LoansFrame(ctk.CTkFrame):
             self._row_widgets.append(rf)
 
             exp = db.expected_monthly_interest(l)
-            pending = db.compute_pending_interest(l) if l["status"] == "Active" else 0
+            pending = db.compute_pending_interest(l)
             pending_color = RED if pending > 0 else TEXT
             original = l.get("original_principal", l["principal"])
             outstanding = l.get("outstanding_principal", l["principal"])
