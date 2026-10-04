@@ -48,17 +48,23 @@ class ImportTemplateGenerator:
                 cell.border = border
             
             # Column widths
-            ws.column_dimensions['A'].width = 12  # Date
+            ws.column_dimensions['A'].width = 14  # Date
             ws.column_dimensions['B'].width = 20  # Borrower Name
             ws.column_dimensions['C'].width = 10  # Due Day
             ws.column_dimensions['D'].width = 20  # Transaction Type
             ws.column_dimensions['E'].width = 12  # Amount
             ws.column_dimensions['F'].width = 15  # Payment Mode
             ws.column_dimensions['G'].width = 25  # Notes
-            
-            # Sample data row
+
+            date_format = "YYYY-MM-DD"
+            for row in range(2, 101):
+                cell = ws.cell(row=row, column=1)
+                cell.number_format = date_format
+
+            # Sample data row — Date is a real Excel date, not a text string
             sample_row = 2
-            ws.cell(row=sample_row, column=1, value=str(date.today()))
+            sample_date = ws.cell(row=sample_row, column=1, value=date.today())
+            sample_date.number_format = date_format
             ws.cell(row=sample_row, column=2, value="Borrower Name")
             ws.cell(row=sample_row, column=3, value=5)
             ws.cell(row=sample_row, column=4, value="Interest Received")
@@ -99,6 +105,22 @@ class ImportTemplateGenerator:
             # Create named ranges for dropdowns (optional - for advanced users)
             # For now, just add basic validation to first 100 rows
             
+            date_dv = DataValidation(
+                type="date",
+                operator="between",
+                formula1="DATE(1990,1,1)",
+                formula2="DATE(2100,12,31)",
+                allow_blank=True,
+            )
+            date_dv.errorTitle = "Invalid date"
+            date_dv.error = "Enter a real date in the Date column. Excel can pick the date for you."
+            date_dv.promptTitle = "Date"
+            date_dv.prompt = "Pick a date in Excel, or type a date. It will be stored as YYYY-MM-DD."
+            date_dv.showInputMessage = True
+            date_dv.showErrorMessage = True
+            ws.add_data_validation(date_dv)
+            date_dv.add("A2:A100")
+
             # Transaction Type dropdown
             txn_types = DataValidation(type="list", formula1='"Interest Received,Principal Received,Loan Given,Adjustment"')
             txn_types.error = 'Must be one of: Interest Received, Principal Received, Loan Given, Adjustment'

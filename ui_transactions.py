@@ -15,6 +15,7 @@ from src.ui.theme import (
     table_header, table_cell, bind_row_hover, confirm_action, notify, explain_error,
     ellipsize,
 )
+from src.ui.date_picker import attach_date_picker
 
 TXN_TYPES = ["Interest Received", "Principal Received"]
 TXN_COLORS = {
@@ -164,12 +165,15 @@ class TransactionsFrame(ctk.CTkFrame):
         ).grid(row=3, column=4, padx=(S12, 4), pady=4, sticky="e")
         date_wrap = ctk.CTkFrame(entry_panel, fg_color="transparent")
         date_wrap.grid(row=3, column=5, columnspan=3, padx=(4, S16), pady=4, sticky="ew")
+        row = ctk.CTkFrame(date_wrap, fg_color="transparent")
+        row.pack(fill="x")
         self._date_entry = ctk.CTkEntry(
-            date_wrap, fg_color=BG, border_color=BORDER, text_color=TEXT,
+            row, fg_color=BG, border_color=BORDER, text_color=TEXT,
             height=36, corner_radius=RADIUS_CONTROL,
         )
         self._date_entry.insert(0, str(date.today()))
-        self._date_entry.pack(fill="x")
+        attach_date_picker(self, self._date_entry, button_parent=row)
+        self._date_entry.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             date_wrap, text="YYYY-MM-DD", font=font_overline(), text_color=MUTED
         ).pack(anchor="w")

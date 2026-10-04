@@ -13,6 +13,7 @@ from src.ui.theme import (
     table_header, table_cell, bind_row_hover, status_badge, setup_dialog,
     confirm_action, notify, explain_error, ellipsize,
 )
+from src.ui.date_picker import attach_date_picker
 
 
 class LoansFrame(ctk.CTkFrame):
@@ -421,12 +422,15 @@ class LoanDialog(ctk.CTkToplevel):
                      ).grid(row=4, column=0, sticky="ne", **p)
         df = ctk.CTkFrame(self, fg_color="transparent")
         df.grid(row=4, column=1, sticky="ew", **p)
+        row = ctk.CTkFrame(df, fg_color="transparent")
+        row.pack(fill="x")
         e = ctk.CTkEntry(
-            df, placeholder_text=str(date.today()),
+            row, placeholder_text=str(date.today()),
             fg_color=BG, border_color=BORDER, text_color=TEXT,
             height=36, corner_radius=RADIUS_CONTROL,
         )
-        e.pack(fill="x")
+        attach_date_picker(self, e, button_parent=row)
+        e.pack(side="left", fill="x", expand=True)
         ctk.CTkLabel(
             df, text="YYYY-MM-DD", font=font_overline(), text_color=MUTED, anchor="w"
         ).pack(fill="x", pady=(4, 0))
