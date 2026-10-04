@@ -14,6 +14,38 @@ from src.services.loan_matcher import LoanMatcher
 
 POSSIBLE_NAME_MATCH_REASON = "Possible match — please confirm"
 
+IMPORTABLE_TXN_TYPES = frozenset({"Interest Received", "Principal Received"})
+
+
+def unsupported_import_type_reason(txn_type: str) -> str | None:
+    """Return a Can't-import reason, or None if the type may be matched/written."""
+    label = (txn_type or "").strip()
+    if label in IMPORTABLE_TXN_TYPES:
+        return None
+    shown = label if label else "(blank)"
+    return f"Unsupported transaction type: {shown}"
+
+
+def write_batch_from_matched(matched_txns: List[Dict]) -> List[Dict]:
+    """Supported matched rows only — never Loan Given / Adjustment / unknown."""
+    batch = []
+    for item in matched_txns:
+        txn = item.get("txn") or {}
+        loan = item.get("loan") or {}
+        if unsupported_import_type_reason(txn.get("txn_type")):
+            continue
+        batch.append({
+            "borrower_id": loan["borrower_id"],
+            "loan_id": loan["loan_id"],
+            "txn_type": txn["txn_type"],
+            "amount": txn["amount"],
+            "txn_date": txn["date"],
+            "notes": txn.get("notes", ""),
+            "payment_mode": txn.get("payment_mode"),
+        })
+    return batch
+
+
 
 def review_dialog_was_cancelled(selected_loan, skipped: bool) -> bool:
     """Stage 7/9: closing the dialog without Select or Skip cancels the import."""
@@ -43,6 +75,11 @@ def classify_import_rows(
         needs_review = False
         review_candidates: List[Dict] = []
         review_reason = ""
+
+        type_error = unsupported_import_type_reason(txn.get("txn_type"))
+        if type_error:
+            error_txns.append({"txn": txn, "error": type_error})
+            continue
 
         try:
             if "loan_display" in txn:
@@ -174,6 +211,10 @@ def apply_review_resolution(
     Never silently assigns a loan — selected_loan must be provided unless skipped.
     """
     txn = review_item["txn"]
+    type_error = unsupported_import_type_reason(txn.get("txn_type"))
+    if type_error:
+        return "invalid"
+
     if skipped or selected_loan is None:
         skipped_review.append({
             "txn": txn,

@@ -20,6 +20,7 @@ from src.services.import_classify import (
     apply_review_resolution,
     review_dialog_was_cancelled,
     POSSIBLE_NAME_MATCH_REASON,
+    write_batch_from_matched,
 )
 from src.ui.ambiguous_match_dialog import AmbiguousMatchDialog
 import database as db
@@ -330,7 +331,12 @@ class ImportDialog(ctk.CTkToplevel):
             loan = item.get("loan") or {}
             rows.append((item["txn"], "Duplicate", "neutral", loan.get("loan_id") or "—"))
         for item in self.error_txns:
-            rows.append((item["txn"], "Can't import", "danger", "—"))
+            rows.append((
+                item["txn"],
+                "Can't import",
+                "danger",
+                item.get("error") or "—",
+            ))
         return rows
 
     def _show_preview(self):
@@ -384,7 +390,7 @@ class ImportDialog(ctk.CTkToplevel):
                 ellipsize(txn.get("borrower_name") or "—", 22),
                 fmt_inr(txn.get("amount") or 0),
                 ellipsize(txn.get("txn_type") or "—", 22),
-                ellipsize(loan_txt, 18),
+                ellipsize(loan_txt, 36),
             ]
             colors = [MUTED, TEXT, TEXT, TEXT, MUTED]
             for ci, (v, col) in enumerate(zip(vals, colors)):
@@ -563,19 +569,7 @@ class ImportDialog(ctk.CTkToplevel):
             self._advance_to_step3()
             return
 
-        batch = []
-        for item in self.matched_txns:
-            txn = item["txn"]
-            loan = item["loan"]
-            batch.append({
-                "borrower_id": loan["borrower_id"],
-                "loan_id": loan["loan_id"],
-                "txn_type": txn["txn_type"],
-                "amount": txn["amount"],
-                "txn_date": txn["date"],
-                "notes": txn.get("notes", ""),
-                "payment_mode": txn.get("payment_mode"),
-            })
+        batch = write_batch_from_matched(self.matched_txns)
 
         imported = 0
         failed = 0

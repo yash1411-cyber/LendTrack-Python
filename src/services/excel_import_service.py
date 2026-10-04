@@ -21,8 +21,9 @@ class ExcelImportService:
     # Optional columns
     OPTIONAL_COLUMNS = ['Payment Mode', 'Notes']
     
-    VALID_TRANSACTION_TYPES = ['Interest Received', 'Principal Received', 
-                               'Loan Given', 'Adjustment']
+    # Legacy Excel may still contain Loan Given / Adjustment; those parse
+    # but are classified as Can't import. Unknown types also parse.
+    IMPORTABLE_TRANSACTION_TYPES = ['Interest Received', 'Principal Received']
     
     def __init__(self):
         self.errors = []
@@ -137,10 +138,10 @@ class ExcelImportService:
         if not borrower_name or borrower_name == 'nan':
             raise ValueError("Borrower Name is required")
         
-        # Validate transaction type
+        # Keep the raw type; unsupported values are classified, not dropped here
         txn_type = str(row['Transaction Type']).strip()
-        if txn_type not in self.VALID_TRANSACTION_TYPES:
-            raise ValueError(f"Invalid Transaction Type: {txn_type}. Must be one of: {', '.join(self.VALID_TRANSACTION_TYPES)}")
+        if not txn_type or txn_type == 'nan':
+            txn_type = ""
         
         # Parse amount
         try:
