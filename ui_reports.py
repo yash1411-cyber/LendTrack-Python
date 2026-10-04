@@ -3,7 +3,7 @@ ui_reports.py - Borrower-wise summary report + Excel export.
 """
 
 import customtkinter as ctk
-from tkinter import messagebox, filedialog
+from tkinter import filedialog
 from datetime import date
 import database as db
 from src.ui.theme import (
@@ -11,7 +11,7 @@ from src.ui.theme import (
     font_body, font_overline, font_body_bold, CONTENT_PAD,
     S8, S12, S16, S32, RADIUS_CARD, ROW_PY,
     fmt_inr, success_button, secondary_button,
-    table_header, table_cell, bind_row_hover, ellipsize,
+    table_header, table_cell, bind_row_hover, ellipsize, notify,
 )
 
 
@@ -144,16 +144,18 @@ class ReportsFrame(ctk.CTkFrame):
 
     def _export_excel(self):
         if not self._report_data:
-            messagebox.showinfo("Export", "No data to export.")
+            notify(self, "Nothing to export.", "There is no report data to export.", tone="info")
             return
         try:
             import openpyxl
             from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         except ImportError:
-            messagebox.showerror(
-                "Missing library",
+            notify(
+                self,
+                "Excel export is unavailable.",
                 "openpyxl is required for Excel export.\n"
                 "Run:  pip install openpyxl",
+                tone="error",
             )
             return
 
@@ -199,4 +201,9 @@ class ReportsFrame(ctk.CTkFrame):
             ws.column_dimensions[col[0].column_letter].width = 18
 
         wb.save(path)
-        messagebox.showinfo("Exported", f"Report saved to:\n{path}")
+        notify(
+            self,
+            "Report exported.",
+            f"The report was saved to:\n{path}",
+            tone="success",
+        )

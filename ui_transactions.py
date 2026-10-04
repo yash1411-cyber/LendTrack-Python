@@ -33,7 +33,7 @@ TYPE_BLURB = {
     "Loan Given": "Original loan amount — not a payment entry",
 }
 SELECT_LOAN = "Select a loan…"
-SELECT_BORROWER = "Select a borrower…"
+SELECT_BORROWER = "Select a borrower"
 FILTER_ALL = "All"
 
 
@@ -102,6 +102,7 @@ class TransactionsFrame(ctk.CTkFrame):
         self._loan_dd.grid(
             row=1, column=3, columnspan=5, padx=(4, S16), pady=(6, 4), sticky="ew"
         )
+        self._loan_dd.configure(state="disabled")
 
         summary = ctk.CTkFrame(
             entry_panel, fg_color=CARD2, corner_radius=RADIUS_CONTROL,
@@ -312,7 +313,7 @@ class TransactionsFrame(ctk.CTkFrame):
 
     def _clear_loan_context(self):
         self._loan_map = {}
-        self._loan_dd.configure(values=[SELECT_LOAN])
+        self._loan_dd.configure(values=[SELECT_LOAN], state="disabled")
         self._loan_var.set(SELECT_LOAN)
         self._apply_selected_loan(None)
 
@@ -321,12 +322,10 @@ class TransactionsFrame(ctk.CTkFrame):
         opts = [f"{b['borrower_id']} – {b['name']}" for b in borrowers]
         prev = self._borrower_var.get()
         prev_loan = self._loan_var.get()
-        self._borrower_dd.configure(values=opts or [SELECT_BORROWER])
+        menu = [SELECT_BORROWER] + opts
+        self._borrower_dd.configure(values=menu)
         if prev in opts:
             self._on_borrower_change(prev, keep_loan_label=prev_loan)
-        elif opts:
-            self._borrower_var.set(opts[0])
-            self._on_borrower_change(opts[0])
         else:
             self._borrower_var.set(SELECT_BORROWER)
             self._clear_loan_context()
@@ -335,6 +334,7 @@ class TransactionsFrame(ctk.CTkFrame):
         if val in (SELECT_BORROWER, "—", None, ""):
             self._clear_loan_context()
             return
+        self._loan_dd.configure(state="normal")
         bid = val.split("–")[0].strip()
         loans = db.get_loans_for_borrower(bid)
         self._loan_map = {}

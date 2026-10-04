@@ -189,19 +189,25 @@ class LendTrackApp(ctk.CTk):
                     frame.focus_borrower(borrower_id)
                 else:
                     frame.refresh()
+                if label == "Borrowers":
+                    self._apply_global_search_to_borrowers()
             else:
                 frame.grid_remove()
 
-    def _on_global_search(self, *_):
-        """Forward search text to Borrowers screen."""
+    def _apply_global_search_to_borrowers(self):
+        """Copy header search into Borrowers without changing the current screen."""
+        b_screen = self._screens.get("Borrowers")
+        if not b_screen or not hasattr(b_screen, "_search"):
+            return
         q = self._search.get()
+        b_screen._search.delete(0, "end")
         if q:
-            self._navigate("Borrowers")
-            b_screen = self._screens.get("Borrowers")
-            if b_screen and hasattr(b_screen, "_search"):
-                b_screen._search.delete(0, "end")
-                b_screen._search.insert(0, q)
-                b_screen._load_table()
+            b_screen._search.insert(0, q)
+        b_screen._load_table()
+
+    def _on_global_search(self, *_):
+        """Filter borrowers if that screen exists; never auto-navigate."""
+        self._apply_global_search_to_borrowers()
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
