@@ -5,11 +5,42 @@ Handles all DB creation, queries, and business logic calculations.
 
 import sqlite3
 import os
+import sys
 from datetime import date, datetime, timedelta
 from typing import Optional
 
-# Database file lives next to the executable / script
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lendtrack.db")
+DB_FILENAME = "lendtrack.db"
+FROZEN_APP_DIR_NAME = "LendTrack"
+
+
+def get_database_path() -> str:
+    """
+    Resolve the SQLite file for the current runtime mode.
+
+    Source (normal) run:
+        <repository>/lendtrack.db  (next to this module)
+
+    Frozen PyInstaller run (sys.frozen):
+        %LOCALAPPDATA%\\LendTrack\\lendtrack.db
+
+    Never uses sys._MEIPASS, the process CWD, or the source repo path when frozen.
+    Does not copy or migrate any existing database.
+    """
+    if getattr(sys, "frozen", False):
+        local_app = os.environ.get("LOCALAPPDATA", "").strip()
+        if not local_app:
+            # Fallback when LOCALAPPDATA is unset: standard Windows Local AppData
+            # under the user profile (same location the env var normally points to).
+            local_app = os.path.join(os.path.expanduser("~"), "AppData", "Local")
+        app_dir = os.path.join(local_app, FROZEN_APP_DIR_NAME)
+        os.makedirs(app_dir, exist_ok=True)
+        return os.path.join(app_dir, DB_FILENAME)
+
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), DB_FILENAME)
+
+
+# Public path used throughout the app; resolved once at import for the runtime mode.
+DB_PATH = get_database_path()
 
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
