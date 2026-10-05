@@ -76,8 +76,15 @@ Or double-click **`LendTrack.bat`** in the repo root. The launcher:
 
 ### 7. Where the database lives
 
-On first launch the app creates **`lendtrack.db`** next to `database.py` / `main.py`
-(the repository root when you run from source).
+**Source run** (Python / `LendTrack.bat`):
+`lendtrack.db` is created next to `database.py` / `main.py` (the repository root).
+
+**Frozen PyInstaller EXE**:
+`%LOCALAPPDATA%\LendTrack\lendtrack.db`
+
+The source database and the frozen EXE database are separate. The app does
+**not** automatically copy, migrate, import, or seed the repository database
+into the EXE location.
 
 - `lendtrack.db` is **local financial data**. It is gitignored. Do not commit it.
 - Normal startup **creates tables if they are missing**.
@@ -185,9 +192,9 @@ Python interpreter. It does **not** use a hardcoded `C:\Users\...` path.
 
 If customtkinter or PyInstaller is missing, the script stops with a clear error.
 
-Output: `dist\LendTrack.exe`. Database location for a frozen EXE follows
-`database.py` (next to the code/extract path). Treat that as application-local
-data, not a shared production file.
+Output: `dist\LendTrack.exe`. A frozen EXE stores its database at
+`%LOCALAPPDATA%\LendTrack\lendtrack.db` (not next to the extract directory,
+and not the repository `lendtrack.db`). Treat that as application-local data.
 
 Do not point a build at a production lending database.
 

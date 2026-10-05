@@ -72,5 +72,7 @@ def test_readme_covers_fresh_windows_setup():
     assert "seed_dev_db.py" in text
     assert "pip install -r requirements.txt" in text
     assert "outstanding" in lowered
-    assert r"%LOCALAPPDATA%" not in text
+    # Frozen EXE DB may document LOCALAPPDATA\\LendTrack; never hardcode site-packages.
     assert "Python311\\site-packages\\customtkinter" not in text
+    assert "Programs\\Python\\Python311" not in text
+    assert "LendTrack\\lendtrack.db" in text or "LendTrack/lendtrack.db" in text
